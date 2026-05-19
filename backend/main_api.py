@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse, FileResponse
 from pydantic import BaseModel
 try:
     from dotenv import load_dotenv
-    load_dotenv(override=True)
+    load_dotenv(dotenv_path="/home/ec2-user/GRAPHRAG-CENTRAL-TEST.4.17/backend/.env", override=True)
 except ImportError:
     pass
 
@@ -16,7 +16,7 @@ logger = logging.getLogger("graphrag_api")
 
 API_KEY = os.environ.get("GRAPHRAG_API_KEY", "").strip()
 GRAPHRAG_ROOT = os.environ.get("GRAPHRAG_ROOT", ".").strip()
-GEMINI_KEY = os.environ.get("GEMINI_API_KEY", "AQ.Ab8RN6IDX_ieeUyoDCI-onIjM-fCtlqcS_LDbJLD09XN5QPUfQ").strip()
+GEMINI_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 SYSTEM_PROMPT = (
     "Та бол Central Test-ийн албан ёсны AI зөвлөх, Талент AI юм. "
     "Өгөгдөлд тулгуурлан монгол хэлээр мэргэжлийн хариулт өгнө.\n\n"

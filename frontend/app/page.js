@@ -5,7 +5,7 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 
 const API_URL = ''
-const API_KEY = process.env.NEXT_PUBLIC_API_KEY || 'AQ.Ab8RN6KBxGEfeFaXXDLDpCph9NDHIe_vFU_uYNGAs1X9s-q7ig'
+const API_KEY = process.env.NEXT_PUBLIC_API_KEY || '';
 
 const STORAGE_KEY = 'ct_chat_history'
 

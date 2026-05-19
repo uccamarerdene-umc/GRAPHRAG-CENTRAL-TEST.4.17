@@ -44,3 +44,4 @@ frontend/.env.local
 frontend/.next/
 frontend/out/
 *.docx
+backend/settings.yaml

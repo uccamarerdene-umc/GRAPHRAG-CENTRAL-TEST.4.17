@@ -3,7 +3,7 @@ completion_models:
     model_provider: openai
     model: gemini-2.5-flash-lite
     auth_method: api_key
-    api_key: AIzaSyB4ogh9icszbJcimgBkkzXFQHH2rsFKkkU
+    api_key: ${GEMINI_API_KEY}
     api_base: https://generativelanguage.googleapis.com/v1beta/openai
     max_tokens: 500
     temperature: 0.0
@@ -19,7 +19,7 @@ embedding_models:
     model_provider: openai
     model: gemini-embedding-001
     auth_method: api_key
-    api_key: AIzaSyB4ogh9icszbJcimgBkkzXFQHH2rsFKkkU
+    api_key: ${GEMINI_API_KEY}
     api_base: https://generativelanguage.googleapis.com/v1beta/openai
     retry:
       type: exponential_backoff
