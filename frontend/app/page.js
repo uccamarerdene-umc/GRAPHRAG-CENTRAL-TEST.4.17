@@ -4,7 +4,7 @@ import { useState, useRef, useEffect } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
  
-const API_URL = ''
+const API_URL = (process.env.NEXT_PUBLIC_API_URL || '').replace(/\/$/, '')
 const API_KEY = process.env.NEXT_PUBLIC_API_KEY || '';
  
 const STORAGE_KEY = 'ct_chat_history'
@@ -91,7 +91,7 @@ export default function Home() {
     try {
       const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]')
       setHistory(saved)
-    } catch {}
+    } catch (err) {}
   }, [])
  
   useEffect(() => {
@@ -108,7 +108,7 @@ export default function Home() {
     setLoading(true)
  
     try {
-      const res = await fetch(`${API_URL}/ask`, {
+      const res = await fetch(`/api/ask`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -126,8 +126,9 @@ export default function Home() {
         setMessages(prev => [...prev, { role: 'ai', text: answer }])
         saveHistory(msg, answer)
       }
-    } catch {
-      setMessages(prev => [...prev, { role: 'error', text: 'Сервертэй холбогдож чадсангүй.' }])
+    } catch (err) {
+      const hint = !API_URL ? 'NEXT_PUBLIC_API_URL тохируулаагүй байна. Vercel → Settings → Environment Variables-д нэмнэ үү.' : `Сервертэй холбогдож чадсангүй. URL: ${API_URL}/ask`
+      setMessages(prev => [...prev, { role: 'error', text: hint }])
     } finally {
       setLoading(false)
       inputRef.current?.focus()
