@@ -16,6 +16,8 @@ except ImportError:
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] - %(message)s")
 logger = logging.getLogger("graphrag_api")
 
+_excel_sessions = {}  # session_id -> excel summary
+
 API_KEY = os.environ.get("GRAPHRAG_API_KEY", "").strip()
 GRAPHRAG_ROOT = os.environ.get("GRAPHRAG_ROOT", ".").strip()
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
@@ -355,6 +357,16 @@ async def ask_graph(request: Request, body: QueryRequest):
         # Excel session context шалгах
         session_id = request.headers.get("X-Session-Id", "default")
         excel_ctx = _excel_sessions.get(session_id)
+        # Файлаас унших
+        if not excel_ctx:
+            import json as _json
+            session_file = f"/tmp/excel_session_{session_id}.json"
+            try:
+                with open(session_file) as sf:
+                    excel_ctx = _json.load(sf)
+                    _excel_sessions[session_id] = excel_ctx
+            except:
+                excel_ctx = None
         if excel_ctx:
             excel_info = (
                 f"\n\n[Excel өгөгдлийн контекст]\n"
@@ -577,6 +589,11 @@ async def analyze_excel(
             "columns": list(df.columns),
             "rows": len(df)
         }
+        # Файлд хадгалах
+        import json as _json
+        session_file = f"/tmp/excel_session_{session_id}.json"
+        with open(session_file, "w") as sf:
+            _json.dump({"summary": summary, "columns": list(df.columns), "rows": len(df)}, sf)
         return {"answer": answer, "rows": len(df), "columns": list(df.columns), "session_id": session_id}
 
     except Exception as ex:
@@ -588,7 +605,6 @@ if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
 
 # ===== EXCEL CONTEXT STORAGE =====
-_excel_sessions = {}  # session_id -> excel summary
 
 # ===== EXCEL ANALYSIS ENDPOINT =====
 
