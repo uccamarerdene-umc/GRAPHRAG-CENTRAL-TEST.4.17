@@ -4,8 +4,8 @@ import { useState, useRef, useEffect } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 
-const API_URL = 'https://kits-bias-discrimination-authorities.trycloudflare.com'
-const API_KEY = process.env.NEXT_PUBLIC_API_KEY || '';
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'https://kits-bias-discrimination-authorities.trycloudflare.com'
+const API_KEY = process.env.NEXT_PUBLIC_API_KEY || 'ac58e02fe0286de3fe21d44967b514ab9e91cfcd31595fd2e767622884caddfa';
 
 const STORAGE_KEY = 'ct_chat_history'
 
