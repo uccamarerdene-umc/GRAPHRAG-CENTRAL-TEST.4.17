@@ -56,6 +56,8 @@ export default function Home() {
   const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
+  const [uploadLoading, setUploadLoading] = useState(false)
+  const fileInputRef = useRef(null)
   const [history, setHistory] = useState([])
   const [showHero, setShowHero] = useState(true)
   const bottomRef = useRef(null)
@@ -71,6 +73,41 @@ export default function Home() {
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages, loading])
+
+  const uploadExcel = async (file, question) => {
+    if (!file || uploadLoading) return
+    setShowHero(false)
+    setUploadLoading(true)
+    const fileName = file.name
+    setMessages(prev => [...prev, { role: 'user', text: `📊 ${fileName} файл оруулав — ${question || 'дүн шинжилгээ хийнэ үү'}` }])
+    try {
+      const formData = new FormData()
+      formData.append('file', file)
+      formData.append('question', question || 'Энэ өгөгдлийг дүн шинжилгээ хийж дүгнэлт гарга')
+      const res = await fetch(`${API_URL}/analyze-excel`, {
+        method: 'POST',
+        headers: { 'X-API-Key': API_KEY },
+        body: formData,
+      })
+      const data = await res.json()
+      if (data.answer) {
+        setMessages(prev => [...prev, { role: 'ai', text: cleanAnswer(data.answer) }])
+      } else {
+        setMessages(prev => [...prev, { role: 'ai', text: 'Файл боловсруулахад алдаа гарлаа.' }])
+      }
+    } catch (e) {
+      setMessages(prev => [...prev, { role: 'ai', text: 'Серверт холбогдоход алдаа гарлаа.' }])
+    }
+    setUploadLoading(false)
+  }
+
+  const handleFileChange = (e) => {
+    const file = e.target.files[0]
+    if (!file) return
+    const q = window.prompt('Энэ өгөгдлөөс юу мэдэхийг хүсэж байна вэ?', 'Дүн шинжилгээ хийж дүгнэлт гарга')
+    uploadExcel(file, q)
+    e.target.value = ''
+  }
 
   const sendMessage = async () => {
     const text = input.trim()
@@ -254,6 +291,30 @@ export default function Home() {
             <div className="input-row">
               <i className="fa-solid fa-plus" style={{ color: '#ccc' }} />
               <input
+                ref={fileInputRef}
+                type="file"
+                accept=".xlsx,.xls,.csv"
+                style={{display:'none'}}
+                onChange={handleFileChange}
+              />
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                disabled={loading || uploadLoading}
+                style={{
+                  background:'none',
+                  border:'1px solid #e2e8f0',
+                  borderRadius:'8px',
+                  padding:'8px 12px',
+                  cursor:'pointer',
+                  fontSize:'18px',
+                  color:'#64748b',
+                  flexShrink:0,
+                }}
+                title="Excel/CSV файл оруулах"
+              >
+                📊
+              </button>
+            <input
                 ref={inputRef}
                 type="text"
                 value={input}

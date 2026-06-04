@@ -1,7 +1,9 @@
 import os, re, uuid, time, logging, asyncio
+import pandas as pd
+import io
 from pathlib import Path
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from pydantic import BaseModel
@@ -476,6 +478,68 @@ async def ask_graph(request: Request, body: QueryRequest):
 async def health():
     return {"status": "ok", "engine": _search_engine is not None}
 
+EXCEL_PROMPT = (
+    "Та бол Central Test-ийн албан ёсны AI зөвлөх, Талент AI юм.\n"
+    "Доорх Excel өгөгдөл нь ажилтнуудын тестийн үр дүн юм.\n"
+    "Монгол хэлээр мэргэжлийн дүн шинжилгээ хийж хариулна уу.\n\n"
+    "Дүрмүүд:\n"
+    "1. Зөвхөн МОНГОЛ хэлээр хариул.\n"
+    "2. Тоон өгөгдөлд үндэслэн бодит дүгнэлт гарга.\n"
+    "3. Байгууллагын нэрийг дурдаж болохгүй.\n"
+    "4. Хариулт 200-350 үгэнд багтаа.\n"
+    "5. Зөвхөн өгөгдөлд байгаа тоог ашигла — зохиож болохгүй.\n\n"
+)
+
+@app.post("/analyze-excel")
+async def analyze_excel(
+    request: Request,
+    file: UploadFile = File(...),
+    question: str = "Энэ өгөгдлийг дүн шинжилгээ хийж дүгнэлт гарга"
+):
+    if request.headers.get("X-API-Key", "") != API_KEY:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    try:
+        contents = await file.read()
+        if file.filename.endswith('.csv'):
+            df = pd.read_csv(io.BytesIO(contents))
+        else:
+            df = pd.read_excel(io.BytesIO(contents))
+
+        # Өгөгдлийн хураангуй
+        summary = f"Нийт мөр: {len(df)}, Багана: {list(df.columns)}\n\n"
+        summary += f"Тоон статистик:\n{df.describe().to_string()}\n\n"
+        summary += f"Эхний 20 мөр:\n{df.head(20).to_string()}"
+
+        prompt = (
+            EXCEL_PROMPT +
+            f"Асуулт: {question}\n\n"
+            f"Өгөгдөл:\n{summary}"
+        )
+
+        gc = _gemini_client
+        response = gc.models.generate_content(
+            model="gemini-2.5-flash-lite",
+            contents=prompt,
+        )
+        answer = response.text.strip()
+
+        # Нэршлийн засвар
+        for wrong, right in {
+            "нийгэмч": "нийтэч", "Нийгэмч": "Нийтэч",
+            "удирдамжийн": "удирдлагын",
+        }.items():
+            answer = answer.replace(wrong, right)
+
+        return {"answer": answer, "rows": len(df), "columns": list(df.columns)}
+
+    except Exception as ex:
+        logger.error(f"Excel analysis failed: {ex}")
+        return JSONResponse(status_code=500, content={"error": f"Алдаа: {str(ex)}"})
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
+# ===== EXCEL ANALYSIS ENDPOINT =====
+
