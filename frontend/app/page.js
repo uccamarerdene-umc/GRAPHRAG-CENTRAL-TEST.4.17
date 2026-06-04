@@ -4,7 +4,7 @@ import { useState, useRef, useEffect } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 
-const API_URL = ''
+const API_URL = 'https://kits-bias-discrimination-authorities.trycloudflare.com'
 const API_KEY = process.env.NEXT_PUBLIC_API_KEY || '';
 
 const STORAGE_KEY = 'ct_chat_history'
