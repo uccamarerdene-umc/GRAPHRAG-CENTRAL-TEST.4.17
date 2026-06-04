@@ -512,3 +512,12 @@ body, html {
   max-width: 100%;
   overflow-x: auto;
 }
+
+.msg.ai table { display: none !important; }
+.msg.ai td, .msg.ai th { display: none !important; }
+.msg.ai p { 
+  line-height: 1.8; 
+  margin-bottom: 12px;
+  max-width: 100%;
+  word-wrap: break-word;
+}
