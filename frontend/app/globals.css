@@ -486,3 +486,29 @@ body, html {
 }
  
 .tests-grid { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
+
+/* Table responsive */
+.msg.ai table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  overflow-x: auto;
+  display: block;
+}
+.msg.ai table th {
+  background: #4F46E5;
+  color: white;
+  padding: 8px 12px;
+  text-align: left;
+}
+.msg.ai table td {
+  padding: 6px 12px;
+  border-bottom: 1px solid #e2e8f0;
+}
+.msg.ai table tr:nth-child(even) {
+  background: #f8f9ff;
+}
+.msg.ai .prose {
+  max-width: 100%;
+  overflow-x: auto;
+}

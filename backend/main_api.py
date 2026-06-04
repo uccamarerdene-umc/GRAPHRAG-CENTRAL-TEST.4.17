@@ -506,10 +506,29 @@ async def analyze_excel(
         else:
             df = pd.read_excel(io.BytesIO(contents))
 
-        # Өгөгдлийн хураангуй
-        summary = f"Нийт мөр: {len(df)}, Багана: {list(df.columns)}\n\n"
-        summary += f"Тоон статистик:\n{df.describe().to_string()}\n\n"
-        summary += f"Эхний 20 мөр:\n{df.head(20).to_string()}"
+        # Өгөгдлийн хураангуй — том файлд ухаалаг боловсруулалт
+        summary = f"Нийт мөр: {len(df)}, Нийт ажилтан: {len(df)}\n"
+        summary += f"Багана: {list(df.columns)}\n\n"
+        
+        # Тоон баганын статистик
+        num_cols = df.select_dtypes(include="number").columns.tolist()
+        if num_cols:
+            summary += f"Тоон үзүүлэлтүүдийн статистик:\n"
+            summary += df[num_cols].describe().round(1).to_string()
+            summary += "\n\n"
+        
+        # Том файл бол дээд/доод оноотойг харуулна
+        if len(df) > 20:
+            summary += f"Хамгийн өндөр оноотой 5 ажилтан:\n"
+            if num_cols:
+                df["Нийт оноо"] = df[num_cols].mean(axis=1).round(1)
+                top5 = df.nlargest(5, "Нийт оноо")
+                summary += top5.to_string() + "\n\n"
+                low5 = df.nsmallest(5, "Нийт оноо")
+                summary += f"Хамгийн бага оноотой 5 ажилтан:\n"
+                summary += low5.to_string() + "\n\n"
+        else:
+            summary += f"Бүх өгөгдөл:\n{df.to_string()}"
 
         prompt = (
             EXCEL_PROMPT +
