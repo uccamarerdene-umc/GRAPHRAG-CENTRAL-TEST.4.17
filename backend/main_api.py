@@ -352,7 +352,20 @@ async def ask_graph(request: Request, body: QueryRequest):
                 request_id=rid, method=body.method, elapsed_ms=0
             )
 
-        query = SYSTEM_PROMPT + body.prompt
+        # Excel session context шалгах
+        session_id = request.headers.get("X-Session-Id", "default")
+        excel_ctx = _excel_sessions.get(session_id)
+        if excel_ctx:
+            excel_info = (
+                f"\n\n[Excel өгөгдлийн контекст]\n"
+                f"Нийт ажилтан: {excel_ctx['rows']}\n"
+                f"Баганууд: {excel_ctx['columns']}\n"
+                f"Өгөгдлийн хураангуй:\n{excel_ctx['summary']}\n"
+                f"Дээрх өгөгдөлд үндэслэн асуултад хариул.\n"
+            )
+            query = SYSTEM_PROMPT + excel_info + "\n\nАсуулт: " + body.prompt
+        else:
+            query = SYSTEM_PROMPT + body.prompt
         
         # Use google.genai for the full completion
         gc = _gemini_client
@@ -479,35 +492,23 @@ async def health():
     return {"status": "ok", "engine": _search_engine is not None}
 
 EXCEL_PROMPT = (
-    "Та бол Central Test-ийн мэргэжлийн I/O сэтгэл зүйч, Талент AI юм.\n"
-    "Доорх Excel өгөгдөл нь ажилтнуудын сэтгэл зүйн тестийн үр дүн юм.\n\n"
-    "ФОРМАТЫН ДҮРЭМ:\n"
-    "- Зөвхөн үргэлжилсэн монгол текст. Хүснэгт, багана үүсгэхгүй.\n"
-    "- Тестийн нэрийг **тодоор** тэмдэглэ.\n"
-    "- Ажилтны нэрийг нэрлэхдээ тодоор дурд.\n\n"
-    "АНАЛИЗЫН ДАРААЛЛЫГ ДОО ЗААСАН 4 ХЭСГЭЭР БИЧ:\n\n"
-    "1-Р ХЭСЭГ — ТЕСТ ТУСБҮРИЙН ДҮГНЭЛТ (хамгийн чухал):\n"
-    "**CTPI** тестийн хувьд: Хамгийн өндөр оноотой хэн бэ, тэр хүн ямар чадвар сайтай. "
-    "Хамгийн бага оноотой хэн бэ, тэд ямар хөгжүүлэлт хэрэгтэй. "
-    "Дундаж оноо нь юуг илтгэж байна.\n"
-    "**Big5** тестийн хувьд: Аль хэмжээс хамгийн өндөр, аль нь хамгийн бага гарсан. "
-    "Энэ нь багийн динамикт хэрхэн нөлөөлж байна.\n"
-    "**EQ** тестийн хувьд: Сэтгэл хөдлөлийн чадвар хэр байна, удирдлагын үүднээс юу анхаарах хэрэгтэй.\n"
-    "**VOC** тестийн хувьд: Мэргэжлийн сонирхол нь одоогийн албан тушаалтай нийцэж байна уу.\n"
-    "**MOTIVATION+** тестийн хувьд: Хэн хамгийн их сэдэлтэй, хэн сэдэлжүүлэх шаардлагатай.\n\n"
-    "2-Р ХЭСЭГ — ХАРЬЦУУЛСАН ДҮГНЭЛТ:\n"
-    "Аль ажилтан олон үзүүлэлтээр өндөр оноотой (talent). "
-    "Аль ажилтан олон үзүүлэлтээр бага оноотой (хөгжүүлэх шаардлагатай). "
-    "Аль үзүүлэлтүүд хоорондоо уялдаатай байна.\n\n"
-    "3-Р ХЭСЭГ — АЛБАН ТУШААЛД ТОХИРОХ БАЙДАЛ:\n"
-    "Тестийн үр дүнд үндэслэн хэн нь удирдлагын, борлуулалтын, "
-    "захиргааны ажилд илүү тохиромжтой болохыг тодорхойл.\n\n"
-    "4-Р ХЭСЭГ — ПРАКТИК ЗӨВЛӨГӨӨ:\n"
-    "Тодорхой ажилтан бүрд (эсвэл бүлэг бүрд) юу хийх хэрэгтэйг бич. "
-    "Сургалт, хөгжүүлэлт, байршуулалтын зөвлөгөө.\n\n"
-    "ЧУХАЛ: Зөвхөн өгөгдөлд байгаа тоо, нэрийг ашигла. Зохиомол тоо гаргахгүй.\n"
-    "Байгууллагын нэр дурдахгүй.\n\n"
+    "Та бол Central Test-ийн AI зөвлөх, Талент AI юм.\n"
+    "Доорх Excel өгөгдөл нь ажилтнуудын тестийн үр дүн юм.\n\n"
+    "ЗААВАР:\n"
+    "1. Зөвхөн МОНГОЛ хэлээр үргэлжилсэн өгүүлбэрээр хариул.\n"
+    "2. Хүснэгт, багана, markdown table (|) огтхон ашиглахгүй.\n"
+    "3. Зөвхөн догол мөр ашигла.\n"
+    "4. Тестийн нэрийг **тодоор** тэмдэглэ.\n"
+    "5. Хариулт 200-300 үгэнд багтаа.\n"
+    "6. Зөвхөн өгөгдөлд байгаа тоог ашигла.\n"
+    "7. Байгууллагын нэр дурдахгүй.\n\n"
+    "АНАЛИЗЫН БҮТЭЦ (догол мөрөөр):\n"
+    "- Ерөнхий дүгнэлт: Бүх тестийн дундаж, ерөнхий байдал\n"
+    "- Тест тус бүр: Өндөр/бага оноотой ажилтан, утга учир\n"
+    "- Онцлох ажилтнууд: Хамгийн өндөр болон хөгжүүлэх шаардлагатай\n"
+    "- Зөвлөгөө: Тодорхой практик алхам\n\n"
 )
+
 
 
 @app.post("/analyze-excel")
@@ -570,7 +571,13 @@ async def analyze_excel(
         }.items():
             answer = answer.replace(wrong, right)
 
-        return {"answer": answer, "rows": len(df), "columns": list(df.columns)}
+        session_id = request.headers.get("X-Session-Id", "default")
+        _excel_sessions[session_id] = {
+            "summary": summary,
+            "columns": list(df.columns),
+            "rows": len(df)
+        }
+        return {"answer": answer, "rows": len(df), "columns": list(df.columns), "session_id": session_id}
 
     except Exception as ex:
         logger.error(f"Excel analysis failed: {ex}")
@@ -579,6 +586,9 @@ async def analyze_excel(
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
+# ===== EXCEL CONTEXT STORAGE =====
+_excel_sessions = {}  # session_id -> excel summary
 
 # ===== EXCEL ANALYSIS ENDPOINT =====
 

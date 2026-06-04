@@ -57,6 +57,8 @@ export default function Home() {
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const [uploadLoading, setUploadLoading] = useState(false)
+  const [sessionId] = useState(() => Math.random().toString(36).substr(2, 9))
+  const [hasExcel, setHasExcel] = useState(false)
   const fileInputRef = useRef(null)
   const [history, setHistory] = useState([])
   const [showHero, setShowHero] = useState(true)
@@ -86,11 +88,12 @@ export default function Home() {
       formData.append('question', question || 'Энэ өгөгдлийг дүн шинжилгээ хийж дүгнэлт гарга')
       const res = await fetch(`${API_URL}/analyze-excel`, {
         method: 'POST',
-        headers: { 'X-API-Key': API_KEY },
+        headers: { 'X-API-Key': API_KEY, 'X-Session-Id': sessionId },
         body: formData,
       })
       const data = await res.json()
       if (data.answer) {
+        setHasExcel(true)
         setMessages(prev => [...prev, { role: 'ai', text: cleanAnswer(data.answer) }])
       } else {
         setMessages(prev => [...prev, { role: 'ai', text: 'Файл боловсруулахад алдаа гарлаа.' }])
@@ -124,6 +127,7 @@ export default function Home() {
         headers: {
           'Content-Type': 'application/json',
           'X-API-Key': API_KEY,
+          'X-Session-Id': sessionId,
         },
         body: JSON.stringify({ prompt: text, method: 'local' }),
       })
