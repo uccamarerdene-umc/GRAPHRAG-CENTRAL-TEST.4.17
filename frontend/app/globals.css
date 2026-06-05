@@ -521,3 +521,28 @@ body, html {
   max-width: 100%;
   word-wrap: break-word;
 }
+
+/* Table засвар — баганан харагдахгүй болгох */
+.msg.ai table {
+  width: 100%;
+  border-collapse: collapse;
+  display: block;
+  overflow-x: auto;
+  font-size: 13px;
+  margin: 8px 0;
+}
+.msg.ai table th {
+  background: var(--primary);
+  color: white;
+  padding: 8px 12px;
+  text-align: left;
+  white-space: nowrap;
+}
+.msg.ai table td {
+  padding: 6px 12px;
+  border-bottom: 1px solid #e2e8f0;
+  vertical-align: top;
+}
+.msg.ai table tr:nth-child(even) td {
+  background: #f8f9ff;
+}
