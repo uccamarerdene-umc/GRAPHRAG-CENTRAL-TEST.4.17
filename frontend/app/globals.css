@@ -546,3 +546,20 @@ body, html {
 .msg.ai table tr:nth-child(even) td {
   background: #f8f9ff;
 }
+
+/* Хариулт баганан болохгүй */
+.msg.ai .prose,
+.msg.ai > div {
+  display: block !important;
+  columns: unset !important;
+  column-count: unset !important;
+}
+.msg.ai p {
+  display: block !important;
+  width: 100% !important;
+  margin-bottom: 12px;
+  line-height: 1.8;
+}
+.msg.ai table {
+  display: none !important;
+}

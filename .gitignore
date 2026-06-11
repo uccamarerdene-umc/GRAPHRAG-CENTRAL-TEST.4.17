@@ -11,7 +11,6 @@ venv311/
 # Node.js
 node_modules/
 .next/
-out/
 dist/
 build/
 
@@ -42,6 +41,6 @@ frontend/.env.local
 
 # Build artifacts
 frontend/.next/
-frontend/out/
 *.docx
 backend/settings.yaml
+out/
