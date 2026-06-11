@@ -16,7 +16,10 @@ except ImportError:
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] - %(message)s")
 logger = logging.getLogger("graphrag_api")
 
-_excel_sessions = {}  # session_id -> excel summary
+import db as _db
+_db.init_db()
+import excel_processor as _ep
+_excel_sessions = {}  # RAM cache
 
 API_KEY = os.environ.get("GRAPHRAG_API_KEY", "").strip()
 GRAPHRAG_ROOT = os.environ.get("GRAPHRAG_ROOT", ".").strip()
@@ -26,8 +29,10 @@ SYSTEM_PROMPT = (
     "Өгөгдөлд тулгуурлан монгол хэлээр мэргэжлийн хариулт өгнө.\n\n"
     "Дүрмүүд:\n"
     "1. Зөвхөн МОНГОЛ хэлээр хариул.\n"
+    "1а. ЧУХАЛ: Хариултыг НЭГДСЭН, ҮРГЭЛЖИЛСЭН өгүүлбэрээр бич. Хэсэг хэсэгт хуваахгүй. Хүснэгт, багана, markdown table огтхон гаргахгүй. Зөвхөн дараалсан өгүүлбэр, догол мөр ашигла.\n"
     "2. Монгол хэлний зөв бичгийн дүрэм чанд баримтал.\n"
     "3. Зөвхөн тестийн нэрийг **тодоор** тэмдэглэ — бусад үгийг болд болгохгүй.\n"
+    "3а. Хариултыг ЗААВАЛ үргэлжилсэн өгүүлбэрээр бич. Хүснэгт, багана үүсгэхгүй. Markdown table (|) хэрэглэхгүй.\n"
     "4. Хариулт 150-250 үгэнд багтаа. Товч, тодорхой байх нь чухал.\n"
     "5. Өгөгдөлд байхгүй тоо, нэр, жишээ зохиож болохгүй. "
     "Ялангуяа дундаж оноо, хувь, статистик тоог ОГТХОН зохиохгүй.\n"
@@ -397,7 +402,7 @@ async def ask_graph(request: Request, body: QueryRequest):
         for attempt in range(max_retries):
             try:
                 gen_response = gc.models.generate_content(
-                    model="gemini-2.5-flash-lite",
+                    model="gemini-2.5-flash",
                     contents=full_prompt,
                 )
                 answer = gen_response.text.strip()
@@ -504,21 +509,27 @@ async def health():
     return {"status": "ok", "engine": _search_engine is not None}
 
 EXCEL_PROMPT = (
-    "Та бол Central Test-ийн AI зөвлөх, Талент AI юм.\n"
-    "Доорх Excel өгөгдөл нь ажилтнуудын тестийн үр дүн юм.\n\n"
-    "ЗААВАР:\n"
-    "1. Зөвхөн МОНГОЛ хэлээр үргэлжилсэн өгүүлбэрээр хариул.\n"
-    "2. Хүснэгт, багана, markdown table (|) огтхон ашиглахгүй.\n"
-    "3. Зөвхөн догол мөр ашигла.\n"
-    "4. Тестийн нэрийг **тодоор** тэмдэглэ.\n"
-    "5. Хариулт 200-300 үгэнд багтаа.\n"
-    "6. Зөвхөн өгөгдөлд байгаа тоог ашигла.\n"
-    "7. Байгууллагын нэр дурдахгүй.\n\n"
-    "АНАЛИЗЫН БҮТЭЦ (догол мөрөөр):\n"
-    "- Ерөнхий дүгнэлт: Бүх тестийн дундаж, ерөнхий байдал\n"
-    "- Тест тус бүр: Өндөр/бага оноотой ажилтан, утга учир\n"
-    "- Онцлох ажилтнууд: Хамгийн өндөр болон хөгжүүлэх шаардлагатай\n"
-    "- Зөвлөгөө: Тодорхой практик алхам\n\n"
+    "Та бол Central Test-ийн мэргэжлийн сэтгэл зүйч, Талент AI юм.\n"
+    "Доорх Excel өгөгдөл нь ажилтнуудын сэтгэл зүйн тестийн үр дүн юм.\n\n"
+    "ФОРМАТЫН ЗААВАР:\n"
+    "- Зөвхөн МОНГОЛ хэлээр, академик найруулгатай, үргэлжилсэн өгүүлбэрээр бич.\n"
+    "- Хүснэгт, багана, markdown table (|) огтхон ашиглахгүй.\n"
+    "- Зөвхөн догол мөр ашигла. Тестийн нэрийг **тодоор** тэмдэглэ.\n"
+    "- Зөвхөн өгөгдөлд байгаа тоог ашигла. Байгууллагын нэр дурдахгүй.\n\n"
+    "ДҮГНЭЛТИЙН БҮТЭЦ:\n\n"
+    "1. ЕРӨНХИЙ ТОЙМ: Нийт ажилтнуудын тестийн үр дүнгийн ерөнхий байдал, "
+    "дундаж оноо, хүч чадал болон сул талуудыг товч дүгнэ.\n\n"
+    "2. ТЕСТ ТУСБҮРИЙН ДҮГНЭЛТ: **CTPI**, **Big5**, **EQ**, **VOC**, **PP Test**, "
+    "**MOTIVATION+** тест тус бүрийн үр дүнг дүгнэ. Хамгийн өндөр болон бага оноотой "
+    "ажилтнуудыг нэрлэж, тэдний хөгжлийн боломжийг тодорхойл.\n\n"
+    "3. ОНЦЛОХ АЖИЛТНУУД: Олон үзүүлэлтээр өндөр оноотой авьяаслаг ажилтнууд болон "
+    "хөгжүүлэх шаардлагатай ажилтнуудыг тодорхойлж, шалтгааныг тайлбарла.\n\n"
+    "4. ХӨГЖҮҮЛЭХ ЗӨВЛӨМЖ: Ажилтан бүр буюу бүлэг бүрд зориулсан тодорхой, "
+    "практик хөгжлийн арга хэмжээ, сургалт, дасгалжуулалтын зөвлөмж өг.\n\n"
+    "5. TALENT MANAGEMENT: Байгууллагын хүний нөөцийн стратегийн хувьд "
+    "авьяас чадварыг хэрхэн хөгжүүлэх, тохиромжтой албан тушаалд байршуулах, "
+    "удирдлагын ур чадварыг бэхжүүлэх талаар мэргэжлийн зөвлөмж өг.\n\n"
+    "Хариулт 350-500 үгэнд багтаа. Монгол хэлний зөв найруулга, академик хэв маягийг чанд баримтал.\n\n"
 )
 
 
@@ -531,73 +542,61 @@ async def analyze_excel(
 ):
     if request.headers.get("X-API-Key", "") != API_KEY:
         raise HTTPException(status_code=401, detail="Unauthorized")
-
     try:
         contents = await file.read()
-        if file.filename.endswith('.csv'):
-            df = pd.read_csv(io.BytesIO(contents))
-        else:
-            df = pd.read_excel(io.BytesIO(contents))
-
-        # Өгөгдлийн хураангуй — том файлд ухаалаг боловсруулалт
-        summary = f"Нийт мөр: {len(df)}, Нийт ажилтан: {len(df)}\n"
-        summary += f"Багана: {list(df.columns)}\n\n"
-        
-        # Тоон баганын статистик
-        num_cols = df.select_dtypes(include="number").columns.tolist()
-        if num_cols:
-            summary += f"Тоон үзүүлэлтүүдийн статистик:\n"
-            summary += df[num_cols].describe().round(1).to_string()
-            summary += "\n\n"
-        
-        # Том файл бол дээд/доод оноотойг харуулна
-        if len(df) > 20:
-            summary += f"Хамгийн өндөр оноотой 5 ажилтан:\n"
-            if num_cols:
-                df["Нийт оноо"] = df[num_cols].mean(axis=1).round(1)
-                top5 = df.nlargest(5, "Нийт оноо")
-                summary += top5.to_string() + "\n\n"
-                low5 = df.nsmallest(5, "Нийт оноо")
-                summary += f"Хамгийн бага оноотой 5 ажилтан:\n"
-                summary += low5.to_string() + "\n\n"
-        else:
-            summary += f"Бүх өгөгдөл:\n{df.to_string()}"
-
-        prompt = (
-            EXCEL_PROMPT +
-            f"Асуулт: {question}\n\n"
-            f"Өгөгдөл:\n{summary}"
+        filename = file.filename or "file.xlsx"
+        processed = _ep.process_excel(contents, filename, question)
+        summary_text = processed["prompt_data"]
+        if len(summary_text) > 12000:
+            summary_text = summary_text[:12000] + "\n...[өгөгдлийн үргэлжлэл орхигдлоо]..."
+        prompt = _ep.build_excel_prompt(
+            {**processed, "prompt_data": summary_text},
+            question, EXCEL_PROMPT
         )
-
         gc = _gemini_client
-        response = gc.models.generate_content(
-            model="gemini-2.5-flash-lite",
-            contents=prompt,
-        )
+        response = gc.models.generate_content(model="gemini-2.5-flash", contents=prompt)
         answer = response.text.strip()
-
-        # Нэршлийн засвар
         for wrong, right in {
             "нийгэмч": "нийтэч", "Нийгэмч": "Нийтэч",
-            "удирдамжийн": "удирдлагын",
+            "удирдамжийн": "удирдлагын", "Удирдамжийн": "Удирдлагын",
+            "эергээр": "эерэгээр", "үр бүтээл": "бүтээмж",
         }.items():
             answer = answer.replace(wrong, right)
-
         session_id = request.headers.get("X-Session-Id", "default")
-        _excel_sessions[session_id] = {
-            "summary": summary,
-            "columns": list(df.columns),
-            "rows": len(df)
+        ctx = {
+            "summary": processed["summary"],
+            "columns": processed["columns"],
+            "rows": processed["rows"],
+            "detected_tests": processed["detected_tests"],
+            "filename": filename,
         }
-        # Файлд хадгалах
-        import json as _json
-        session_file = f"/tmp/excel_session_{session_id}.json"
-        with open(session_file, "w") as sf:
-            _json.dump({"summary": summary, "columns": list(df.columns), "rows": len(df)}, sf)
-        return {"answer": answer, "rows": len(df), "columns": list(df.columns), "session_id": session_id}
-
+        _excel_sessions[session_id] = ctx
+        try:
+            _db.save_excel_session(
+                session_id=session_id,
+                filename=filename,
+                rows=processed["rows"],
+                columns=processed["columns"],
+                summary=processed["summary"],
+                raw_data=processed["raw_data"],
+            )
+            _db.save_message(session_id, "user", f"📊 {filename} файл оруулав — {question}")
+            _db.save_message(session_id, "ai", answer)
+        except Exception as db_err:
+            logger.warning(f"DB save failed: {db_err}")
+        result = {
+            "answer": answer,
+            "rows": processed["rows"],
+            "columns": processed["columns"],
+            "detected_tests": processed["detected_tests"],
+            "session_id": session_id,
+            "filename": filename,
+        }
+        if processed["dropped_cols"] > 0:
+            result["warning"] = f"{processed['dropped_cols']} багана орхигдлоо — хамгийн ялгаатай 20 баганыг ашиглав"
+        return result
     except Exception as ex:
-        logger.error(f"Excel analysis failed: {ex}")
+        logger.error(f"Excel analysis failed: {ex}", exc_info=True)
         return JSONResponse(status_code=500, content={"error": f"Алдаа: {str(ex)}"})
 
 if __name__ == "__main__":
