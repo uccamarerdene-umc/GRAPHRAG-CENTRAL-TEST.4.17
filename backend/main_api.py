@@ -358,6 +358,11 @@ async def ask_graph(request: Request, body: QueryRequest):
                 excel_ctx = None
  
         if excel_ctx:
+            _ex_dt = excel_ctx.get('detected_tests', [])
+            _ex_dt = _ex_dt if isinstance(_ex_dt, list) else [str(_ex_dt)]
+            _ex_forbidden = [t for t in ['CTPI','Big5','PP','VOC','EQ','MOTIVATION+','Sales Competency','SALES']
+                             if not any(t.lower() in str(d).lower() for d in _ex_dt)]
+            _ex_forbidden_str = ", ".join(_ex_forbidden) if _ex_forbidden else "байхгүй"
             last_ans = excel_ctx.get("last_answer", "")
             prev = f"\n\nӨмнөх дүн шинжилгээний хариулт:\n{last_ans}\n" if last_ans else ""
             excel_info = (
@@ -369,7 +374,7 @@ async def ask_graph(request: Request, body: QueryRequest):
                 f"{prev}"
                 f"[EXCEL PROMPT GUARD]\n"
                 f"Энэ файлд ЗӨВХӨН байгаа тест: {excel_ctx.get('detected_tests', '')}\n"
-                f"ХАТУУ ХОРИГЛОНО: {[t for t in ['CTPI','Big5','PP','VOC','EQ','MOTIVATION+','Sales Competency','SALES'] if not any(t.lower() in str(d).lower() for d in (excel_ctx.get('detected_tests', []) if isinstance(excel_ctx.get('detected_tests'), list) else [str(excel_ctx.get('detected_tests', ''))]))}\n"
+                f"ХАТУУ ХОРИГЛОНО: {_ex_forbidden_str}\n"
                 f"Дээрх ХОРИГЛОНО жагсаалтын тестийн нэр, нэршил, хэмжүүрийг хариултад НЭГ Ч УДАА дурдаж болохгүй.\n"
                 f"Зөрчвөл хариулт БҮРЭН БУРУУ тооцогдоно.\n"
                 f"Дээрх өгөгдөлд үндэслэн асуултад хариул.\n"
