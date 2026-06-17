@@ -92,9 +92,43 @@ SYSTEM_PROMPT = (
     "Big5: Нээлттэй(6-10), Нягт нямбай(6-10), Нийтэч эрч(6-9), Бусдад анхаарал(6-9), Сэтгэл хөдлөлийн тэнцвэр(6-9). "
     "VOC сонирхол өндөр+CTPI ур чадвар нийцвэл=тогтвортой бүтээмжтэй ажилтан. "
     "PP хандлага нь CTPI ур чадварын суурь болдог.\n\n"
+    "PROMPT GUARD — ЭХ СУРВАЛЖИЙН ХЯЗГААРЛАЛТ (ХАТУУ ДАГАХ):\n"
+    "GraphRAG context дахь эх сурвалжийг заавал шалга.\n"
+    "- Context ЗӨВХӨН PP / PP2 баримт агуулж байвал: CTPI, Big5, Sales Competency, VOC, EQ-ийн нэршлийг ОГТХОН дурдаж болохгүй.\n"
+    "- Context ЗӨВХӨН CTPI баримт агуулж байвал: PP, Big5, Sales Competency-ийн нэрийг ашиглахгүй.\n"
+    "- Context ЗӨВХӨН Big5 баримт агуулж байвал: CTPI, PP, Sales Competency-ийн нэрийг ашиглахгүй.\n"
+    "- Context ЗӨВХӨН Sales Competency баримт агуулж байвал: CTPI, Big5, PP, VOC-ийн нэрийг ашиглахгүй.\n"
+    "- Context олон тестийн баримт агуулж байвал: тест тус бүрийн мэдээллийг тусад нь дурд, хольж болохгүй.\n"
+    "- Context-д байхгүй тестийн мэдээлэл хэрэгтэй бол: Энэ асуултад хариулах мэдээлэл одоогийн эх сурвалжид байхгүй байна гэж хариул.\n\n"
     "Асуулт: "
 )
  
+
+# ---------------------------------------------------------------------------
+# Prompt Guard helper — GraphRAG context-оос тест тодорхойлох
+# ---------------------------------------------------------------------------
+_CONTEXT_TEST_PATTERNS = {
+    "ctpi":             [r"\bctpi\b"],
+    "big5":             [r"big.?5", r"нийтэч", r"нягт нямбай", r"openness", r"neuroticism"],
+    "pp":               [r"\bpp\b", r"\bpp2\b", r"professional.?profile",
+                         r"focus.?on.?facts", r"desire.?to.?lead", r"баримтад тулгуурладаг"],
+    "pp test":          [r"pp.?test"],
+    "voc":              [r"\bvoc\b", r"intellectual.?curiosity", r"enterprising"],
+    "eq":               [r"\beq\b", r"emotional.?intell", r"сэтгэл хөдлөлийн"],
+    "motivation":       [r"motivation\\+?", r"сэдэл"],
+    "sales competency": [r"sales.?competency", r"борлуулалт"],
+}
+
+def _detect_tests_from_context(context_text: str) -> list:
+    """GraphRAG context-оос ямар тест илэрснийг тодорхойлно."""
+    import re as _re
+    found = []
+    low = context_text.lower()
+    for label, pats in _CONTEXT_TEST_PATTERNS.items():
+        if any(_re.search(p, low, _re.IGNORECASE) for p in pats):
+            found.append(label)
+    return found
+
 # ---------------------------------------------------------------------------
 # Нэршлийн засвар — нэг л газар тодорхойлно, хаа сайгүй ашиглана
 # ---------------------------------------------------------------------------
@@ -112,15 +146,41 @@ _TEXT_REPLACEMENTS = {
     "үр бүтээлтэй": "бүтээмжтэй", "үр бүтээл": "бүтээмж",
 }
  
-def _fix_text(text: str) -> str:
+# Глобал зөвшөөрөгдсөн тестүүд
+_allowed_tests: list = []
+
+def set_allowed_tests(tests: list):
+    global _allowed_tests
+    _allowed_tests = [t.lower() for t in tests] if tests else []
+
+def _fix_text(text: str, allowed: list = None) -> str:
     """Нэршлийн автомат засвар — нэг удаа дуудна."""
     for wrong, right in _TEXT_REPLACEMENTS.items():
         text = text.replace(wrong, right)
     text = re.sub(r'Ний[а-яёөүА-ЯЁӨҮA-Za-z]*\s+эрч', 'Нийтэч эрч', text)
     text = re.sub(r'ний[а-яёөүА-ЯЁӨҮA-Za-z]*\s+эрч', 'нийтэч эрч', text)
     text = re.sub(r'(Нийл|Нийм|Нийр|Нийг|Нийс|Нийд|Нийх)[а-яёөүА-ЯЁӨҮ]*\s+эрч', 'Нийтэч эрч', text)
-    text = re.sub(r'(нийл|нийм|нийр|нийг|нийс|нийд|нийх)[а-яёөүА-ЯЁӨҮ]*\s+эрч', 'нийтэч эрч', text)
-    return text
+    text = re.sub(r'(нийл|нийм|нийр|нийг|нийс|нийд|нийх)[а-яёөүА-ЯЁӨҮA-Za-z]*\s+эрч', 'нийтэч эрч', text)
+    # Зөвшөөрөгдөөгүй тестийн нэрийг арилгах
+    check = allowed if allowed is not None else _allowed_tests
+    if check:
+        all_tests = ["CTPI", "Big5", "PP Test", "PP тест", "VOC", "EQ", "MOTIVATION+", "Sales Competency", "SALES"]
+        for t in all_tests:
+            if not any(t.lower() in a for a in check):
+                # **TestName** болон TestName бүх хэлбэрийг арилгах
+                text = re.sub(rf'\*\*{re.escape(t)}\*\*', '', text)
+                text = re.sub(rf'\*{re.escape(t)}\*', '', text)
+                # "TestName тестийн", "TestName-ийн" гэх мэт
+                text = re.sub(rf'{re.escape(t)}[- ийн]*тест[^.]*\.', '', text, flags=re.IGNORECASE)
+                text = re.sub(rf'{re.escape(t)}[- ийн]*үр дүн[^.]*\.', '', text, flags=re.IGNORECASE)
+                # Үлдсэн TestName дурдлага бүрийг арилгах
+                pat = re.escape(t)
+                text = re.sub(pat + r'[- ийн]*тест[^.]*\.', '', text, flags=re.IGNORECASE)
+                text = re.sub(pat + r'[- ийн]*үр дүн[^.]*\.', '', text, flags=re.IGNORECASE)
+                text = re.sub(r'\b' + pat + r'\b', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    text = re.sub(r'  +', ' ', text)
+    return text.strip()
  
  
 # ---------------------------------------------------------------------------
@@ -134,7 +194,19 @@ def _gemini_generate(gc, prompt: str, model: str = "gemini-2.5-flash") -> str:
     max_retries = 8
     for attempt in range(max_retries):
         try:
-            resp = gc.models.generate_content(model=model, contents=prompt)
+            from google.genai import types as _gtypes
+            resp = gc.models.generate_content(
+                model=model,
+                contents=prompt,
+                config=_gtypes.GenerateContentConfig(
+                    system_instruction=(
+                        "Та Central Test-ийн AI зөвлөх. "
+                        "ХАМГИЙН ЧУХАЛ ДҮРЭМ: Хэрэв prompt дотор PROMPT GUARD байвал "
+                        "тэнд заасан байхгүй тестүүдийг ОГТХОН дурдаж болохгүй. "
+                        "Зөвхөн илэрсэн тестийн өгөгдөлд үндэслэн хариул."
+                    )
+                )
+            )
             return resp.text.strip()
         except Exception as err:
             err_str = str(err)
@@ -313,7 +385,11 @@ async def ask_graph(request: Request, body: QueryRequest):
         answer = await loop.run_in_executor(
             None, lambda: _gemini_generate(_gemini_client, full_prompt)
         )
-        answer = _fix_text(answer)
+        if excel_ctx:
+            detected_fix = excel_ctx.get("detected_tests", [])
+            answer = _fix_text(answer, allowed=[t.lower() for t in detected_fix] if detected_fix else None)
+        else:
+            answer = _fix_text(answer, allowed=_detect_tests_from_context(context_text))
 
         # /ask post-filter: excel session-д байхгүй тестийн нэрийг арилгах
         if excel_ctx:
@@ -412,7 +488,7 @@ async def analyze_excel(
 
         # Retry дотор дуудна
         answer = _gemini_generate(_gemini_client, prompt)
-        answer = _fix_text(answer)
+        answer = _fix_text(answer, allowed=[t.lower() for t in detected])
  
         session_id = request.headers.get("X-Session-Id", "default")
         ctx = {
