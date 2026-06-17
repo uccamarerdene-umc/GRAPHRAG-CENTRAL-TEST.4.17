@@ -108,15 +108,19 @@ SYSTEM_PROMPT = (
 # Prompt Guard helper — GraphRAG context-оос тест тодорхойлох
 # ---------------------------------------------------------------------------
 _CONTEXT_TEST_PATTERNS = {
-    "ctpi":             [r"\bctpi\b"],
-    "big5":             [r"big.?5", r"нийтэч", r"нягт нямбай", r"openness", r"neuroticism"],
-    "pp":               [r"\bpp\b", r"\bpp2\b", r"professional.?profile",
-                         r"focus.?on.?facts", r"desire.?to.?lead", r"баримтад тулгуурладаг"],
-    "pp test":          [r"pp.?test"],
-    "voc":              [r"\bvoc\b", r"intellectual.?curiosity", r"enterprising"],
-    "eq":               [r"\beq\b", r"emotional.?intell", r"сэтгэл хөдлөлийн"],
-    "motivation":       [r"motivation\\+?", r"сэдэл"],
-    "sales competency": [r"sales.?competency", r"борлуулалт"],
+    # Тест бүрийг ЗӨВХӨН тухайн тестийн файлын нэр/code-р илрүүлнэ
+    # Агуулгын үгээр илрүүлэхгүй — давхцал гарна
+    "ctpi":             [r"\bctpi\b", r"ctpi.?tailan", r"ctpi.?report"],
+    "big5":             [r"\bbig.?5\b", r"big5.?tailan", r"big5.?report",
+                         r"five.?factor", r"\bneo\b"],
+    "pp":               [r"\bpp2\b", r"professional.?profile.?2",
+                         r"pp2.?tailan", r"pp.?test.?tailan"],
+    "pp test":          [r"\bpp.?test\b"],
+    "voc":              [r"\bvoc\b", r"voc.?tailan"],
+    "eq":               [r"\beq\b", r"eq.?tailan", r"emotional.?intelligence.?report"],
+    "motivation":       [r"\bmotivation\+?\b", r"motivation.?tailan"],
+    "sales competency": [r"\bsales.?competency\b", r"sales.?profile",
+                         r"borluulalt.?tailan"],
 }
 
 def _detect_tests_from_context(context_text: str) -> list:
@@ -363,9 +367,11 @@ async def ask_graph(request: Request, body: QueryRequest):
                 f"Илэрсэн тестүүд: {excel_ctx.get('detected_tests', '')}\n"
                 f"Өгөгдлийн хураангуй:\n{excel_ctx['summary']}\n"
                 f"{prev}"
-                f"ХАТУУ ДҮРЭМ: Зөвхөн {excel_ctx.get('detected_tests', '')} тест(үүд)-ийн үр дүнг ашигла.\n"
-                f"CTPI өгөгдөл байгаа бол зөвхөн CTPI. Big5 байхгүй бол Big5 дурдахгүй. PP байхгүй бол PP дурдахгүй.\n"
-                f"Байхгүй тестийн нэрийг ОГТХОН зохиож, дурдаж болохгүй. Зөрчвөл буруу хариулт тооцогдоно.\n"
+                f"[EXCEL PROMPT GUARD]\n"
+                f"Энэ файлд ЗӨВХӨН байгаа тест: {excel_ctx.get('detected_tests', '')}\n"
+                f"ХАТУУ ХОРИГЛОНО: {[t for t in ['CTPI','Big5','PP','VOC','EQ','MOTIVATION+','Sales Competency','SALES'] if not any(t.lower() in str(d).lower() for d in (excel_ctx.get('detected_tests', []) if isinstance(excel_ctx.get('detected_tests'), list) else [str(excel_ctx.get('detected_tests', ''))]))}\n"
+                f"Дээрх ХОРИГЛОНО жагсаалтын тестийн нэр, нэршил, хэмжүүрийг хариултад НЭГ Ч УДАА дурдаж болохгүй.\n"
+                f"Зөрчвөл хариулт БҮРЭН БУРУУ тооцогдоно.\n"
                 f"Дээрх өгөгдөлд үндэслэн асуултад хариул.\n"
             )
             query = SYSTEM_PROMPT + excel_info + "\n\nАсуулт: " + body.prompt
