@@ -131,16 +131,16 @@ def _gemini_generate(gc, prompt: str, model: str = "gemini-2.5-flash") -> str:
     Retry with exponential backoff.
     503 болон 429 алдааг барьж, дахин оролдоно.
     """
-    max_retries = 5
+    max_retries = 8
     for attempt in range(max_retries):
         try:
             resp = gc.models.generate_content(model=model, contents=prompt)
             return resp.text.strip()
         except Exception as err:
             err_str = str(err)
-            retryable = any(code in err_str for code in ("503", "429", "RESOURCE_EXHAUSTED", "rate limit"))
+            retryable = any(code in err_str for code in ("503", "429", "RESOURCE_EXHAUSTED", "rate limit", "UNAVAILABLE"))
             if retryable and attempt < max_retries - 1:
-                wait = 2 ** attempt   # 1, 2, 4, 8, 16 секунд
+                wait = min(2 ** attempt, 60)  # 1, 2, 4, 8, 16, 32, 60, 60 секунд
                 logger.warning(f"Gemini алдаа ({err_str[:80]}), {wait}s хүлээж дахин оролдоно...")
                 time.sleep(wait)
             else:
@@ -282,11 +282,18 @@ async def ask_graph(request: Request, body: QueryRequest):
                 excel_ctx = None
  
         if excel_ctx:
+            last_ans = excel_ctx.get("last_answer", "")
+            prev = f"\n\nӨмнөх дүн шинжилгээний хариулт:\n{last_ans}\n" if last_ans else ""
             excel_info = (
                 f"\n\n[Excel өгөгдлийн контекст]\n"
                 f"Нийт ажилтан: {excel_ctx['rows']}\n"
                 f"Баганууд: {excel_ctx['columns']}\n"
+                f"Илэрсэн тестүүд: {excel_ctx.get('detected_tests', '')}\n"
                 f"Өгөгдлийн хураангуй:\n{excel_ctx['summary']}\n"
+                f"{prev}"
+                f"ХАТУУ ДҮРЭМ: Зөвхөн {excel_ctx.get('detected_tests', '')} тест(үүд)-ийн үр дүнг ашигла.\n"
+                f"CTPI өгөгдөл байгаа бол зөвхөн CTPI. Big5 байхгүй бол Big5 дурдахгүй. PP байхгүй бол PP дурдахгүй.\n"
+                f"Байхгүй тестийн нэрийг ОГТХОН зохиож, дурдаж болохгүй. Зөрчвөл буруу хариулт тооцогдоно.\n"
                 f"Дээрх өгөгдөлд үндэслэн асуултад хариул.\n"
             )
             query = SYSTEM_PROMPT + excel_info + "\n\nАсуулт: " + body.prompt
@@ -307,7 +314,20 @@ async def ask_graph(request: Request, body: QueryRequest):
             None, lambda: _gemini_generate(_gemini_client, full_prompt)
         )
         answer = _fix_text(answer)
- 
+
+        # /ask post-filter: excel session-д байхгүй тестийн нэрийг арилгах
+        if excel_ctx:
+            import re as _re3
+            detected_ask = excel_ctx.get("detected_tests", [])
+            if isinstance(detected_ask, str):
+                detected_ask = [detected_ask]
+            all_tests = ["CTPI", "Big5", "PP", "PP Test", "VOC", "EQ", "MOTIVATION+", "Sales Competency"]
+            missing_ask = [t for t in all_tests if not any(t.lower() in d.lower() for d in detected_ask)]
+            for mt in missing_ask:
+                import re as _re3
+                answer = _re3.sub(rf'\*\*{_re3.escape(mt)}\*\*', mt, answer)
+                answer = _re3.sub(rf'(?<!\w){_re3.escape(mt)}(?!\w)[^.]*тест[^.]*\.', '', answer)
+
         ms = int((time.time() - t0) * 1000)
         if not answer:
             return JSONResponse(status_code=502, content={"error": "Empty answer."})
@@ -329,23 +349,19 @@ EXCEL_PROMPT = (
     "Хэрэглэгчийн өгсөн Excel өгөгдөл болон тестийн үр дүнд сэтгэл зүйн гүнзгий дүн шинжилгээ (Psychometric Analysis) хийхдээ "
     "хувь ажилтан бүрээр биш, тухайн БАЙГУУЛЛАГЫН НИЙТ ДҮР ТӨРХ, БАГИЙН СОЁЛД нэгдсэн дүн шинжилгээ хийнэ.\n\n"
     "ЧАНД БАРИМТЛАХ ШАЛГУУР ШААРДЛАГУУД:\n\n"
-    "1. ХАРИУЛТЫН ФОРМАТ — уг бүтцийг хэзээ ч өөрчилж болохгүй, ХҮСНЭГТ АШИГЛАХГҮЙ:\n"
-    "---\n"
+    "ХАТУУ ДҮРЭМ — ЭНЭ ДҮРМИЙГ ЗӨРЧВӨЛ ХАРИУЛТ БУРУУ ТООЦОГДОНО:\n"
+    "1. ХҮСНЭГТ, БАГАНА, MARKDOWN TABLE (|) ОГТХОН АШИГЛАХГҮЙ. ЗӨРЧВӨЛ БУРУУ!\n"
+    "2. Зөвхөн өгөгдөлд байгаа ТЕСТИЙН нэрийг ашигла. CTPI өгвөл зөвхөн CTPI. Big5 өгвөл зөвхөн Big5. ОГТХОН ХОЛЬЖ БОЛОХГҮЙ!\n"
+    "3. Бүх хариултыг ЗӨВХӨН үргэлжилсэн өгүүлбэр, догол мөрөөр бич.\n\n"
     "ТАЛЕНТ АЙ: ХҮНИЙ НӨӨЦИЙН СЭТГЭЛ ЗҮЙН ДҮН ШИНЖИЛГЭЭ\n"
-    "Эх сурвалж: [Тестийн нэрс] | Хамрах хүрээ: [Нийт мөр болон тоон утгын хэмжээ]\n"
-    "Шинжээч: Талент АЙ (Хиймэл оюун ухаант зөвлөх систем)\n\n"
-    "⚖️ ЕРӨНХИЙ ТОЙМ & СИСТЕМИЙН ДҮГНЭЛТ\n"
-    "[Байгууллагын багийн нийт дундаж үзүүлэлт болон соёлын ерөнхий тойм.]\n\n"
-    "👤 БАЙГУУЛЛАГЫН ДҮР ТӨРХ, СОЁЛЫН ГҮНЗГИЙ ДҮН ШИНЖИЛГЭЭ\n"
-    "Сэтгэл зүйн хэв маяг: [...]\n"
-    "Хүчтэй талууд: [...]\n"
-    "Стратегийн зөрчилдөөний эрсдэл (Критик цэг): [...]\n"
-    "Шинжилгээ: [...]\n\n"
-    "📈 ТАЛЕНТ МЕНЕЖМЕНТ & ХЭРЭГЖИХҮЙЦ ЗӨВЛӨМЖ\n"
-    "Байгууллагын оношлогоо: [...]\n"
-    "Санал болгох бүтэц / Үүрэг: [...]\n"
-    "Богино хугацааны хөгжлийн дасгал (Actionable Insight): [...]\n"
-    "---\n\n"
+    "Эх сурвалж: [Зөвхөн өгөгдөлд байгаа тестийн нэр] | Хамрах хүрээ: [Нийт мөр]\n"
+    "Шинжээч: Талент АЙ\n\n"
+    "⚖️ ЕРӨНХИЙ ТОЙМ\n"
+    "Үргэлжилсэн өгүүлбэрээр бич. Хүснэгт огт гаргахгүй.\n\n"
+    "👤 БАЙГУУЛЛАГЫН ДҮР ТӨРХ\n"
+    "Үргэлжилсэн өгүүлбэрээр бич. Хүснэгт огт гаргахгүй.\n\n"
+    "📈 ЗӨВЛӨМЖ\n"
+    "Үргэлжилсэн өгүүлбэрээр бич. Хүснэгт огт гаргахгүй.\n\n"
     "2. Зөвхөн НЭГ ТЕСТ-ийн үр дүн оруулсан бол бусад тестийн нэр томьёо ашиглахыг ХАТУУ ХОРИГЛОНО.\n"
     "3. Excel-ээс орж ирж буй БҮХ МӨР, ТООН УТГА бүрийг бүрэн уншиж дундаж, хазайлтыг тооцно.\n"
     "4. Урт онолын тайлбар устга. Өгүүлбэр бүр нягт, стратегийн шийдвэрт туслах байна.\n"
@@ -369,10 +385,31 @@ async def analyze_excel(
         summary_text = processed["prompt_data"]
         if len(summary_text) > 30000:
             summary_text = summary_text[:30000] + "\n...[өгөгдлийн үргэлжлэл орхигдлоо]..."
+        # Prompt Guard — зөвхөн илэрсэн тестийн нэрийг ашиглах
+        detected = processed.get("detected_tests", [])
+        if isinstance(detected, str):
+            detected = [detected]
+        detected_str = ", ".join(detected) if detected else "тодорхойгүй"
+        all_possible = ["CTPI", "Big5", "PP", "VOC", "EQ", "MOTIVATION+", "Sales Competency"]
+        missing = [t for t in all_possible if not any(t.lower() in d.lower() for d in detected)]
+        missing_str = ", ".join(missing) if missing else ""
+
+        guard = (
+            f"\n\n╔══ PROMPT GUARD ══╗\n"
+            f"Энэ файлд ЗӨВХӨН дараах тест(үүд) байна: {detected_str}\n"
+        )
+        if missing_str:
+            guard += f"ОГТХОН дурдаж болохгүй тестүүд: {missing_str}\n"
+        guard += (
+            f"Дээрх байхгүй тестүүдийн нэр, үр дүн, хэмжүүрийг хариултад оруулбал БУРУУ хариулт болно.\n"
+            f"╚════════════════════╝\n"
+        )
+
         prompt = _ep.build_excel_prompt(
             {**processed, "prompt_data": summary_text}, question, EXCEL_PROMPT
         )
- 
+        prompt = prompt + guard
+
         # Retry дотор дуудна
         answer = _gemini_generate(_gemini_client, prompt)
         answer = _fix_text(answer)
@@ -384,6 +421,7 @@ async def analyze_excel(
             "rows": processed["rows"],
             "detected_tests": processed["detected_tests"],
             "filename": filename,
+            "last_answer": answer[:3000] if answer else "",
         }
         _excel_sessions[session_id] = ctx
         try:
