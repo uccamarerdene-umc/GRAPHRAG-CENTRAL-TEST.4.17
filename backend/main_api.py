@@ -1,532 +1,530 @@
-import os, re, uuid, time, logging, asyncio
-import pandas as pd
-import io
-from pathlib import Path
-from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form
+"""
+main_api.py — Talent AI FastAPI Backend v2.5.0
+Fixes v2.5:
+  - google.generativeai → google.genai (шинэ SDK, requirements.txt-тай нийцүүлсэн)
+  - Gemini multi-turn chat history зөв дамждаг
+  - GraphRAG байхгүй/муу хариулсан ч Gemini ЗААВАЛ ажилладаг
+  - User асуулт ҮРГЭЛЖ DB-д хадгалагддаг
+  - "мэдээлэл хангалтгүй" гэж хариулах боломжгүй
+"""
+
+import os
+import re
+import logging
+import asyncio
+from typing import Optional, List, Dict, Any
+
+from google import genai
+from google.genai import types
+
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, FileResponse
-from pydantic import BaseModel
-try:
-    from dotenv import load_dotenv
-    load_dotenv(dotenv_path="/home/ec2-user/GRAPHRAG-CENTRAL-TEST.4.17/backend/.env", override=True)
-except ImportError:
-    pass
- 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] - %(message)s")
-logger = logging.getLogger("graphrag_api")
- 
-import db as _db
-_db.init_db()
-import excel_processor as _ep
-_excel_sessions = {}  # RAM cache
- 
-API_KEY = os.environ.get("GRAPHRAG_API_KEY", "").strip()
-GRAPHRAG_ROOT = os.environ.get("GRAPHRAG_ROOT", ".").strip()
-GEMINI_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
- 
-SYSTEM_PROMPT = (
-    "Та бол Central Test-ийн албан ёсны AI зөвлөх, Талент AI юм. "
-    "Өгөгдөлд тулгуурлан монгол хэлээр мэргэжлийн хариулт өгнө.\n\n"
-    "Дүрмүүд:\n"
-    "1. Зөвхөн МОНГОЛ хэлээр хариул.\n"
-    "1а. ЧУХАЛ: Хариултыг НЭГДСЭН, ҮРГЭЛЖИЛСЭН өгүүлбэрээр бич. Хэсэг хэсэгт хуваахгүй. Хүснэгт, багана, markdown table огтхон гаргахгүй. Зөвхөн дараалсан өгүүлбэр, догол мөр ашигла.\n"
-    "2. Монгол хэлний зөв бичгийн дүрэм чанд баримтал.\n"
-    "3. Зөвхөн тестийн нэрийг **тодоор** тэмдэглэ — бусад үгийг болд болгохгүй.\n"
-    "3а. Хариултыг ЗААВАЛ үргэлжилсэн өгүүлбэрээр бич. Хүснэгт, багана үүсгэхгүй. Markdown table (|) хэрэглэхгүй.\n"
-    "4. Хариулт 150-250 үгэнд багтаа. Товч, тодорхой байх нь чухал.\n"
-    "5. Өгөгдөлд байхгүй тоо, нэр, жишээ зохиож болохгүй. "
-    "Ялангуяа дундаж оноо, хувь, статистик тоог ОГТХОН зохиохгүй.\n"
-    "6. Ямар ч байгууллага, компани, ХХК-ийн нэрийг дурдаж болохгүй.\n"
-    "7. Өгөгдөл дутуу байвал: 'Энэ асуултад хариулах мэдээлэл "
-    "одоогоор хангалттай байхгүй байна. Central Test-ийн зөвлөхүүдтэй "
-    "холбогдоно уу' гэж хариул.\n"
-    "8. ЗӨВХӨН GraphRAG context-д байгаа тестүүдийг дурд. "
-    "Context-д байхгүй тестийн нэрийг ОГТХОН санал болгохгүй. "
-    "Жишээ нь: context зөвхөн CTPI агуулж байвал Big5, Sales, VOC-г дурдаж болохгүй.\n"
-    "9. Central Test нь зөвхөн менежерийн тест биш — "
-    "ажилтан сонгон шалгаруулалт, хөгжүүлэлт, карьерын чиг баримжаа, "
-    "хувь хүний хөгжил зэрэгт ашиглагддаг сэтгэл зүйн үнэлгээний "
-    "иж бүрэн шийдэл юм.\n\n"
-    "10. Central Test-тэй огт хамааралгүй асуулт (газарзүй, улс төр, "
-    "хоол, спорт гэх мэт) ирвэл: 'Би Central Test-ийн AI зөвлөх тул "
-    "зөвхөн тестүүдтэй холбоотой асуулт хариулна' гэж хэл.\n"
-    "11. Хоёрдмол утгатай асуулт ирвэл тодруулга хүс.\n"
-    "12. Богино асуулт (10 үгнээс доош) → 100-150 үгэн хариулт өг.\n\n"
-    "CTPI-ийн 4 үндсэн бүлэг (энэ нэршлийг ашигла):\n"
-    "- Бусдыг удирдах хандлага\n"
-    "- Өөрийгөө удирдах хандлага\n"
-    "- Өөрчлөлтийг удирдах хандлага\n"
-    "- Ажилдаа хандах хандлага\n\n"
-    "Нэр томьёоны зөв хэрэглээ: туршилт→тест, психометрийн→сэтгэл зүйн, "
-    "үр бүтээл→бүтээмж, зохицол өндөртэй→уялдаа сайтай, "
-    "удирдамжийн→удирдлагын, эергээр→эерэгээр, вест→тест, "
-    "хөдөлмөрийн түвшин→ажлын сэдэл, нэр дэвшигч→ажил горилогч.\n\n"
-    "ОПТИМАЛ ОНОО: Оптималаас доош=хөгжүүлэх, оптималын хязгаарт=тохиромжтой(сул тал биш!), "
-    "оптималаас дээш=хэт өндөр. "
-    "ЧУХАЛ: Оптималд байгаа оноог ХЭЗЭЭ Ч сул тал гэж тайлбарлаж болохгүй!\n\n"
-    "ТЕСТҮҮДИЙН УР ЧАДВАРЫН ЯЛГАА (зөвхөн context-д байгаа тестэд хамаарна):\n"
-    "CTPI=ажлын байрны ур чадвар.\n"
-    "ОГТХОН ХОЛЬЖ БОЛОХГҮЙ — context-д байхгүй тестийг дурдахгүй.\n\n"
-    "ХАРИУЛТ БИЧИХ ФОРМАТ: 1)Оноог оптималтай харьцуулж тайлбарла "
-    "2)Тестүүдийн уялдааг тайлбарла 3)Давуу тал 4)Сул тал 5)Тохиромжтой ажлын байр 6)Хөгжүүлэх зөвлөмж.\n\n"
-    "CTPI 9 БҮЛЭГ: [АНАЛИЗ][БОРЛУУЛАЛТ][ХАРИЛЦАА][УДИРДЛАГА][ТӨЛӨВЛӨЛТ][БАГ][ДАСАН ЗОХИЦОХ][ЁС ЗҮЙ][АЖЛЫН ХАНДЛАГА].\n\n"
-    "PROMPT GUARD — ЭХ СУРВАЛЖИЙН ХЯЗГААРЛАЛТ (ХАТУУ ДАГАХ):\n"
-    "GraphRAG context дахь эх сурвалжийг заавал шалга.\n"
-    "- Context ЗӨВХӨН PP / PP2 баримт агуулж байвал: CTPI, Big5, Sales Competency, VOC, EQ-ийн нэршлийг ОГТХОН дурдаж болохгүй.\n"
-    "- Context ЗӨВХӨН CTPI баримт агуулж байвал: PP, Big5, Sales Competency-ийн нэрийг ашиглахгүй.\n"
-    "- Context ЗӨВХӨН Big5 баримт агуулж байвал: CTPI, PP, Sales Competency-ийн нэрийг ашиглахгүй.\n"
-    "- Context ЗӨВХӨН Sales Competency баримт агуулж байвал: CTPI, Big5, PP, VOC-ийн нэрийг ашиглахгүй.\n"
-    "- Context олон тестийн баримт агуулж байвал: тест тус бүрийн мэдээллийг тусад нь дурд, хольж болохгүй.\n"
-    "- Context-д байхгүй тестийн мэдээлэл хэрэгтэй бол: Энэ асуултад хариулах мэдээлэл одоогийн эх сурвалжид байхгүй байна гэж хариул.\n\n"
-    "Асуулт: "
+from pydantic import BaseModel, Field
+
+from db import (
+    init_db, create_session, get_session, update_session_file,
+    get_all_sessions, delete_session, save_message, get_messages,
 )
- 
+from excel_processor import process_excel
 
-# ---------------------------------------------------------------------------
-# Prompt Guard helper — GraphRAG context-оос тест тодорхойлох
-# ---------------------------------------------------------------------------
-_CONTEXT_TEST_PATTERNS = {
-    # Тест бүрийг ЗӨВХӨН тухайн тестийн файлын нэр/code-р илрүүлнэ
-    # Агуулгын үгээр илрүүлэхгүй — давхцал гарна
-    "ctpi":             [r"\bctpi\b", r"ctpi.?tailan", r"ctpi.?report"],
-    "big5":             [r"\bbig.?5\b", r"big5.?tailan", r"big5.?report",
-                         r"five.?factor", r"\bneo\b"],
-    "pp":               [r"\bpp2\b", r"professional.?profile.?2",
-                         r"pp2.?tailan", r"pp.?test.?tailan"],
-    "pp test":          [r"\bpp.?test\b"],
-    "voc":              [r"\bvoc\b", r"voc.?tailan"],
-    "eq":               [r"\beq\b", r"eq.?tailan", r"emotional.?intelligence.?report"],
-    "motivation":       [r"\bmotivation\+?\b", r"motivation.?tailan"],
-    "sales competency": [r"\bsales.?competency\b", r"sales.?profile",
-                         r"borluulalt.?tailan"],
-}
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s — %(message)s")
+logger = logging.getLogger("talent_ai")
 
-def _detect_tests_from_context(context_text: str) -> list:
-    """GraphRAG context-оос ямар тест илэрснийг тодорхойлно."""
-    import re as _re
-    found = []
-    low = context_text.lower()
-    for label, pats in _CONTEXT_TEST_PATTERNS.items():
-        if any(_re.search(p, low, _re.IGNORECASE) for p in pats):
-            found.append(label)
-    return found
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_MODEL = "gemini-2.5-flash"
 
-# ---------------------------------------------------------------------------
-# Нэршлийн засвар — нэг л газар тодорхойлно, хаа сайгүй ашиглана
-# ---------------------------------------------------------------------------
-_TEXT_REPLACEMENTS = {
-    "Ниймэл": "Нийтэч", "ниймэл": "нийтэч",
-    "Ниймтэй": "Нийтэч", "ниймтэй": "нийтэч",
-    "Нийгэмч": "Нийтэч", "нийгэмч": "нийтэч",
-    "Ниймч": "Нийтэч", "ниймч": "нийтэч",
-    "Нийрч": "Нийтэч", "нийрч": "нийтэч",
-    "Ний тэч": "Нийтэч", "ний тэч": "нийтэч",
-    "Ниймц": "Нийтэч", "ниймц": "нийтэч",
-    "Н ягт": "Нягт",
-    "удирдамжийн": "удирдлагын", "Удирдамжийн": "Удирдлагын",
-    "эергээр": "эерэгээр",
-    "үр бүтээлтэй": "бүтээмжтэй", "үр бүтээл": "бүтээмж",
-}
- 
-# Глобал зөвшөөрөгдсөн тестүүд
-_allowed_tests: list = []
+# google-genai SDK client
+_genai_client: Optional[genai.Client] = None
 
-def set_allowed_tests(tests: list):
-    global _allowed_tests
-    _allowed_tests = [t.lower() for t in tests] if tests else []
+def get_genai_client() -> genai.Client:
+    global _genai_client
+    if _genai_client is None:
+        if not GEMINI_API_KEY:
+            raise RuntimeError("GEMINI_API_KEY environment variable not set")
+        _genai_client = genai.Client(api_key=GEMINI_API_KEY)
+    return _genai_client
 
-def _fix_text(text: str, allowed: list = None) -> str:
-    """Нэршлийн автомат засвар — нэг удаа дуудна."""
-    for wrong, right in _TEXT_REPLACEMENTS.items():
-        text = text.replace(wrong, right)
-    text = re.sub(r'Ний[а-яёөүА-ЯЁӨҮA-Za-z]*\s+эрч', 'Нийтэч эрч', text)
-    text = re.sub(r'ний[а-яёөүА-ЯЁӨҮA-Za-z]*\s+эрч', 'нийтэч эрч', text)
-    text = re.sub(r'(Нийл|Нийм|Нийр|Нийг|Нийс|Нийд|Нийх)[а-яёөүА-ЯЁӨҮ]*\s+эрч', 'Нийтэч эрч', text)
-    text = re.sub(r'(нийл|нийм|нийр|нийг|нийс|нийд|нийх)[а-яёөүА-ЯЁӨҮA-Za-z]*\s+эрч', 'нийтэч эрч', text)
-    # Зөвшөөрөгдөөгүй тестийн нэрийг арилгах
-    check = allowed if allowed is not None else _allowed_tests
-    if check:
-        all_tests = ["CTPI", "Big5", "PP Test", "PP тест", "VOC", "EQ", "MOTIVATION+", "Sales Competency", "SALES"]
-        for t in all_tests:
-            if not any(t.lower() in a for a in check):
-                # **TestName** болон TestName бүх хэлбэрийг арилгах
-                text = re.sub(rf'\*\*{re.escape(t)}\*\*', '', text)
-                text = re.sub(rf'\*{re.escape(t)}\*', '', text)
-                # "TestName тестийн", "TestName-ийн" гэх мэт
-                text = re.sub(rf'{re.escape(t)}[- ийн]*тест[^.]*\.', '', text, flags=re.IGNORECASE)
-                text = re.sub(rf'{re.escape(t)}[- ийн]*үр дүн[^.]*\.', '', text, flags=re.IGNORECASE)
-                # Үлдсэн TestName дурдлага бүрийг арилгах
-                pat = re.escape(t)
-                text = re.sub(pat + r'[- ийн]*тест[^.]*\.', '', text, flags=re.IGNORECASE)
-                text = re.sub(pat + r'[- ийн]*үр дүн[^.]*\.', '', text, flags=re.IGNORECASE)
-                text = re.sub(r'\b' + pat + r'\b', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'\n{3,}', '\n\n', text)
-    text = re.sub(r'  +', ' ', text)
-    return text.strip()
- 
- 
-# ---------------------------------------------------------------------------
-# Gemini дуудлага — retry + rate-limit handling
-# ---------------------------------------------------------------------------
-def _gemini_generate(gc, prompt: str, model: str = "gemini-2.5-flash") -> str:
-    """
-    Retry with exponential backoff.
-    503 болон 429 алдааг барьж, дахин оролдоно.
-    """
-    max_retries = 8
-    for attempt in range(max_retries):
-        try:
-            from google.genai import types as _gtypes
-            resp = gc.models.generate_content(
-                model=model,
-                contents=prompt,
-                config=_gtypes.GenerateContentConfig(
-                    system_instruction=(
-                        "Та Central Test-ийн AI зөвлөх. "
-                        "ХАМГИЙН ЧУХАЛ ДҮРЭМ: Хэрэв prompt дотор PROMPT GUARD байвал "
-                        "тэнд заасан байхгүй тестүүдийг ОГТХОН дурдаж болохгүй. "
-                        "Зөвхөн илэрсэн тестийн өгөгдөлд үндэслэн хариул."
-                    )
-                )
-            )
-            return resp.text.strip()
-        except Exception as err:
-            err_str = str(err)
-            retryable = any(code in err_str for code in ("503", "429", "RESOURCE_EXHAUSTED", "rate limit", "UNAVAILABLE"))
-            if retryable and attempt < max_retries - 1:
-                wait = min(2 ** attempt, 60)  # 1, 2, 4, 8, 16, 32, 60, 60 секунд
-                logger.warning(f"Gemini алдаа ({err_str[:80]}), {wait}s хүлээж дахин оролдоно...")
-                time.sleep(wait)
-            else:
-                raise
- 
- 
+
 _search_engine = None
-_gemini_client = None
- 
-def _load_graphrag():
-    global _search_engine, _gemini_client
-    os.environ["OPENAI_API_KEY"] = GEMINI_KEY
-    from google import genai as gai
-    _gemini_client = gai.Client(api_key=GEMINI_KEY)
-    from graphrag.config.load_config import load_config
-    from graphrag.query.factory import get_local_search_engine
-    from graphrag.query.indexer_adapters import (
-        read_indexer_entities,
-        read_indexer_relationships,
-        read_indexer_reports,
-        read_indexer_text_units,
+
+def get_local_search_engine():
+    global _search_engine
+    if _search_engine is None:
+        try:
+            from graphrag_engine import build_local_search_engine  # type: ignore
+            _search_engine = build_local_search_engine()
+            logger.info("GraphRAG initialised.")
+        except Exception as exc:
+            logger.warning("GraphRAG unavailable: %s", exc)
+            raise
+    return _search_engine
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  STATE
+# ═══════════════════════════════════════════════════════════════════════════
+
+class AgentState(BaseModel):
+    session_id: str
+    user_prompt: str
+    chat_history: List[Dict[str, Any]] = []
+    has_excel: bool = False
+    excel_stats: Optional[str] = Field(default=None)
+    detected_test_name: Optional[str] = Field(default=None)
+    graphrag_context: Optional[str] = Field(default=None)
+    raw_analysis: Optional[str] = Field(default=None)
+    final_output: Optional[str] = Field(default=None)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  TEXT CLEANUP
+# ═══════════════════════════════════════════════════════════════════════════
+
+_TEXT_REPLACEMENTS = {
+    "Ниймэл": "Нийтэч", "ниймэл": "нийтэч", "Ниймтэй": "Нийтэч", "ниймтэй": "нийтэч",
+    "Нийгэмч": "Нийтэч", "нийгэмч": "нийтэч", "Ниймч": "Нийтэч", "ниймч": "нийтэч",
+    "Нийрч": "Нийтэч", "нийрч": "нийтэч", "Ний тэч": "Нийтэч", "ний тэч": "нийтэч",
+    "Ниймц": "Нийтэч", "ниймц": "нийтэч", "Н ягт": "Нягт",
+    "удирдамжийн": "удирдлагын", "Удирдамжийн": "Удирдлагын",
+    "эергээр": "эерэгээр", "үр бүтээлтэй": "бүтээмжтэй", "үр бүтээл": "бүтээмж",
+}
+
+def apply_mongolian_regex_fixes(text: str) -> str:
+    if not text:
+        return text
+    for old, new in _TEXT_REPLACEMENTS.items():
+        text = text.replace(old, new)
+    patterns = [
+        (r"^[ \t]*[-\*\+]\s+", "", re.MULTILINE),
+        (r"^[ \t]*\d+[\.\)]\s+", "", re.MULTILINE),
+        (r"\.{2,}", "…"), (r"\s{2,}", " "), (r" \n", "\n"), (r"\n{3,}", "\n\n"),
+        (r"\bгэж\s+байна\b", "гэнэ"), (r"\bбайгаа\s+юм\b", "байна"),
+        (r"\|.*?\|", ""), (r"_{1,2}([^_]+)_{1,2}", r"\1"), (r"#+\s", ""),
+        (r"```[\s\S]*?\n```", ""), (r"`([^`]+)`", r"\1"), (r"[ \t]+$", ""),
+    ]
+    for item in patterns:
+        text = re.sub(item[0], item[1], text, flags=item[2]) if len(item) == 3 else re.sub(item[0], item[1], text)
+    return text.strip()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  СИСТЕМИЙН PROMPT
+# ═══════════════════════════════════════════════════════════════════════════
+
+HMM_KNOWLEDGE = """
+HMM (Harvard ManageMentor) СУРГАЛТЫН 42 МОДУЛЬ БА 61 ГОЛ УР ЧАДВАР:
+
+МАНЛАЙЛАЛ (Leading People, Delegating, Persuading):
+  Ур чадвар: Манлайлах, Үүрэг даалгавар шилжүүлэх, Нөлөөлөх, Шийдвэр гаргах
+
+СТРАТЕГИ (Strategic Thinking, Innovation, Change Management):
+  Ур чадвар: Стратеги сэтгэлгээ, Инноваци, Өөрчлөлтийн удирдлага, Алсын хараа
+
+ХАРИЛЦАА (Difficult Interactions, Negotiating, Communication):
+  Ур чадвар: Харилцааны ур чадвар, Хэлэлцээр хийх, Зөрчилдөөн шийдвэрлэх, Итгэлцэл
+
+ГҮЙЦЭТГЭЛ (Project Management, Time Management, Coaching):
+  Ур чадвар: Төслийн төлөвлөлт, Цагийн менежмент, Коучинг, Гүйцэтгэлийн хэмжүүр
+
+БАЙГУУЛЛАГЫН СОЁЛ (Ethics at Work, Diversity, Hiring):
+  Ур чадвар: Ёс зүй, Олон талт байдал, Баг бүрдүүлт, Ажлын байрны соёл
+
+CTPI ТЕСТ — МАППИНГ (Удирдлагын болон менежерийн чадвар):
+  Манлайлах чадвар (Оптимал 6-8):   0-5 → HMM: Leading People, Delegating (8 ур чадвар)
+  Стратеги сэтгэлгээ (Оптимал 7-9): 0-6 → HMM: Strategic Thinking, Strategy Planning and Execution, Innovation (7 ур чадвар)
+  Өөрчлөлт удирдах (Оптимал 6-8):   0-5 → HMM: Change Management, Resilience (5 ур чадвар)
+
+PP ТЕСТ — МАППИНГ (Ажлын хандлага):
+  Удирдан чиглүүлэх (Оптимал 7-9):  0-6 → HMM: Coaching, Leading People
+  Ятган нөлөөлөх (Оптимал 6-8):     0-5 → HMM: Negotiating, Presentation Skills (12 ур чадвар)
+  Стресс/Харилцаа (Оптимал 6-8):    0-5 → HMM: Difficult Interactions, Stress Management (10 ур чадвар)
+  Дүрэм журмыг дагах (Оптимал 6-8): 0-5 → HMM: Ethics at Work
+  Шуурхай гүйцэтгэх (Оптимал 6-8): 0-5 → HMM: Time Management, Project Management, Managing Up (10 ур чадвар)
+  Коучинг/Гүйцэтгэл (Оптимал 6-8): 0-5 → HMM: Coaching, Feedback Essentials, Performance Measurement (9 ур чадвар)
+
+Big5 ТЕСТ — МАППИНГ (Зан төлөвийн үнэлгээ):
+  Нягт нямбай байдал (Оптимал 6-10):        0-5 → HMM: Process Improvement, Performance Measurement, Writing Skills, Finance Essentials (10 ур чадвар)
+  Сэтгэл хөдлөлийн тогтвортой байдал (6-9): 0-5 → HMM: Difficult Interactions, Stress Management
+  Нийтэч эрч хүчтэй байдал (6-9):           0-5 → HMM: Global Collaboration, Communication
+
+СУРГАЛТЫН ТӨЛӨВЛӨГӨӨ ЗАГВАР:
+  1-р АЛХАМ: Сул оноотой чиглэлүүдийг тодорхойл
+  2-р АЛХАМ: Тохирох HMM модулиудыг тодорхой нэрлэ
+  3-р АЛХАМ: Хугацааны эрэмбэ: 1-р сар (яаралтай) → 2-3-р сар (дунд) → 4-6-р сар (урт хугацаа)
+  4-р АЛХАМ: Тус бүрийн хүлээгдэж буй үр дүнг тайлбарла
+"""
+
+def build_system_prompt(state: AgentState, graphrag_context: str = "") -> str:
+    prompt = (
+        "Та бол Central Test-ийн мэргэшсэн ХҮНИЙ НӨӨЦИЙН ХИЙМЭЛ ОЮУН УХААНТ ЗӨВЛӨХ — 'Талент АЙ' юм.\n\n"
+        "🔴 ХАМГИЙН ЧУХАЛ ДҮРЭМ:\n"
+        "- 'Мэдээлэл хангалтгүй', 'холбогдоно уу', 'одоогоор байхгүй' гэж ХЭЗЭЭ Ч хариулж болохгүй.\n"
+        "- Өмнөх чатны түүхэнд тестийн оноо, шинжилгээ байвал ЗААВАЛ тэр дээр үндэслэн хариулна.\n"
+        "- Chat history хоосон байвал ч HMM мэдлэгийн санд үндэслэн хариулна.\n"
+        "- Follow-up асуулт ирэхэд өмнөх бүх хариулт дээр нэмж хариулна.\n\n"
+        "🟡 ФОРМАТЫН ДҮРЭМ:\n"
+        "- Зөвхөн МОНГОЛ хэлээр, урсгал өгүүлбэрээр бич.\n"
+        "- Зураас (-), од (*), тоон жагсаалт ашиглахгүй.\n"
+        "- Тестийн нэрсийг **CTPI**, **PP**, **Big5** тодоор тэмдэглэ.\n"
+        "- HMM модулийн нэрийг 'Harvard ManageMentor хөтөлбөрийн [нэр]' гэж дурд.\n"
+        "- Оптимал мужид байгаа оноог сул тал гэж хэлж болохгүй.\n\n"
+        + HMM_KNOWLEDGE
     )
-    from graphrag_vectors import create_vector_store, VectorStoreType, VectorStoreConfig, IndexSchema
-    root = Path(GRAPHRAG_ROOT)
-    output = root / "output"
-    config = load_config(root_dir=root)
-    e  = pd.read_parquet(output / "entities.parquet")
-    r  = pd.read_parquet(output / "relationships.parquet")
-    c  = pd.read_parquet(output / "community_reports.parquet")
-    t  = pd.read_parquet(output / "text_units.parquet")
-    cm = pd.read_parquet(output / "communities.parquet")
-    entities          = read_indexer_entities(e, cm, community_level=2)
-    relationships     = read_indexer_relationships(r)
-    community_reports = read_indexer_reports(c, cm, community_level=2)
-    text_units        = read_indexer_text_units(t)
-    vs_config = VectorStoreConfig(
-        type=VectorStoreType.LanceDB,
-        db_uri=str(output / "lancedb"),
-        vector_size=3072,
-    )
-    schema = IndexSchema(index_name="entity_description")
-    store = create_vector_store(vs_config, schema)
-    store.connect()
- 
-    class GeminiEmbedder:
-        def embed(self, text):
-            res = _gemini_client.models.embed_content(
-                model="gemini-embedding-001", contents=text
+    if state.has_excel and state.excel_stats:
+        _all_t = ["CTPI","Big5","PP","VOC","EQ","MOTIVATION+","Sales Competency"]
+        _dt = state.detected_test_name or ""
+        _dtl = [x.strip() for x in re.split(r"[,\s]+", _dt) if x.strip()]
+        _forb = [t for t in _all_t if not any(t.lower() in d.lower() for d in _dtl)] if _dtl else []
+        _eg = ("\n[EXCEL PROMPT GUARD]\n"
+               + "Энэ файлд ЗӨВХӨН: " + (_dt or "?") + "\n"
+               + ("ХОРИГЛОНО: " + ", ".join(_forb) + "\n" if _forb else "")
+               + "Хориглосон тестийн нэрийг НЭГ Ч УДАА дурдахгүй.\n") if _dtl else ""
+        prompt += "\n\n📊 EXCEL ӨГӨГДЛИЙН ХУРААНГУЙ (ЭНЭ ДЭЭР ҮНДЭСЛЭН ХАРИУЛ):\n" + state.excel_stats + "\n" + _eg
+    if graphrag_context:
+        prompt += f"\n\n📚 НЭМЭЛТ МЭДЛЭГ (GraphRAG):\n{graphrag_context}\n"
+    return prompt
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  GEMINI HELPERS (google-genai SDK)
+# ═══════════════════════════════════════════════════════════════════════════
+
+async def gemini_chat(system_prompt: str, history: List[Dict], user_message: str) -> str:
+    """
+    google-genai SDK-р multi-turn chat дуудна.
+    history: [{"role": "user"|"model", "parts": ["text"]}]
+    """
+    client = get_genai_client()
+
+    # History-г types.Content list болгоно
+    contents = []
+    for msg in history:
+        role = msg.get("role", "user")
+        parts = msg.get("parts", [])
+        contents.append(
+            types.Content(
+                role=role,
+                parts=[types.Part(text=p) for p in parts if p],
             )
-            return res.embeddings[0].values
- 
-        def embedding(self, input, **kwargs):
-            vecs = [self.embed(t) for t in input] if isinstance(input, list) else [self.embed(input)]
-            class R:
-                def __init__(self, v):
-                    self.embeddings = [type("E", (), {"values": x})() for x in v]
-                @property
-                def first_embedding(self):
-                    return self.embeddings[0].values
-            return R(vecs)
- 
-    _search_engine = get_local_search_engine(
-        config=config,
-        reports=community_reports,
-        text_units=text_units,
-        entities=entities,
-        relationships=relationships,
-        covariates={},
-        description_embedding_store=store,
-        response_type="multiple paragraphs",
+        )
+    # Одоогийн хэрэглэгчийн асуулт нэм
+    contents.append(
+        types.Content(role="user", parts=[types.Part(text=user_message)])
     )
-    if hasattr(_search_engine, "context_builder") and \
-       hasattr(_search_engine.context_builder, "text_embedder"):
-        _search_engine.context_builder.text_embedder = GeminiEmbedder()
-    logger.info("Engine loaded OK")
- 
- 
-@asynccontextmanager
-async def lifespan(app):
+
+    config = types.GenerateContentConfig(
+        system_instruction=system_prompt,
+        temperature=0.7,
+        max_output_tokens=4096,
+    )
+
+    response = await asyncio.to_thread(
+        client.models.generate_content,
+        model=GEMINI_MODEL,
+        contents=contents,
+        config=config,
+    )
+    return response.text or ""
+
+
+async def gemini_simple(system_prompt: str, user_message: str) -> str:
+    """Энгийн нэг удаагийн Gemini дуудалт."""
+    client = get_genai_client()
+    config = types.GenerateContentConfig(
+        system_instruction=system_prompt,
+        temperature=0.5,
+        max_output_tokens=4096,
+    )
+    response = await asyncio.to_thread(
+        client.models.generate_content,
+        model=GEMINI_MODEL,
+        contents=user_message,
+        config=config,
+    )
+    return response.text or ""
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  AGENT 1 — Router
+# ═══════════════════════════════════════════════════════════════════════════
+
+def agent_router(state: AgentState) -> AgentState:
     try:
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, _load_graphrag)
-        logger.info("Startup complete")
-    except Exception as ex:
-        logger.error(f"Startup failed: {ex}")
-    yield
- 
- 
-app = FastAPI(title="Central Test", lifespan=lifespan)
+        session = get_session(state.session_id)
+    except Exception as exc:
+        logger.warning("[Agent 1] DB lookup failed: %s", exc)
+        return state.model_copy(update={"has_excel": False})
+
+    if not session:
+        return state.model_copy(update={"has_excel": False})
+
+    d = dict(session)
+    excel_stats = d.get("summary")
+    detected_test = d.get("test_name")
+    if not excel_stats:
+        return state.model_copy(update={"has_excel": False})
+
+    return state.model_copy(update={
+        "has_excel": True,
+        "excel_stats": excel_stats,
+        "detected_test_name": detected_test,
+    })
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  AGENT 2 — Psychometric Expert
+# ═══════════════════════════════════════════════════════════════════════════
+
+async def agent_psychometric_expert(state: AgentState) -> AgentState:
+    logger.info("[Agent 2] Processing (history=%d msgs)...", len(state.chat_history))
+
+    # GraphRAG — optional
+    graphrag_context = ""
+    try:
+        engine = get_local_search_engine()
+        prompt_lower = state.user_prompt.lower()
+        follow_kw = ["тус", "дээрх", "төлөвлөгөө", "үүнээс", "дараагийн",
+                     "сургалт", "хөгжил", "зөвлөмж", "өгнө үү", "гаргаж"]
+        is_follow_up = any(kw in prompt_lower for kw in follow_kw) and len(state.chat_history) > 0
+        _dtq = state.detected_test_name or "Central Test"
+        query = f"{_dtq} сургалтын төлөвлөгөө хөгжлийн арга" if is_follow_up else f"{state.user_prompt}\n{state.excel_stats or ''}"
+        result = await asyncio.to_thread(engine.search, query)
+        raw_ctx = result.response if hasattr(result, "response") else str(result)
+        BAD = ["хангалттай байхгүй байна", "холбогдоно уу", "мэдээлэл одоогоор", "insufficient"]
+        if not any(p in raw_ctx for p in BAD):
+            graphrag_context = raw_ctx
+    except Exception as exc:
+        logger.warning("[Agent 2] GraphRAG skip: %s", exc)
+
+    system_prompt = build_system_prompt(state, graphrag_context)
+
+    # DB history → Gemini format
+    gemini_history = []
+    for msg in state.chat_history:
+        role = msg.get("role", "")
+        content = msg.get("content", "")
+        if not content:
+            continue
+        gemini_history.append({
+            "role": "user" if role == "user" else "model",
+            "parts": [content],
+        })
+
+    logger.info("[Agent 2] Gemini call with %d history turns", len(gemini_history))
+
+    raw_analysis = ""
+    try:
+        raw_analysis = await gemini_chat(system_prompt, gemini_history, state.user_prompt)
+        logger.info("[Agent 2] Gemini responded (%d chars)", len(raw_analysis))
+    except Exception as exc:
+        logger.error("[Agent 2] Gemini failed: %s", exc)
+        raw_analysis = "Системд техникийн алдаа гарлаа. Түр хүлээгээд дахин оролдоно уу."
+
+    return state.model_copy(update={"raw_analysis": raw_analysis, "graphrag_context": graphrag_context})
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  AGENT 3 — Formatter
+# ═══════════════════════════════════════════════════════════════════════════
+
+async def agent_critic_formatter(state: AgentState) -> AgentState:
+    if not state.raw_analysis:
+        return state.model_copy(update={"final_output": "Шинжилгээний үр дүн олдсонгүй."})
+
+    if (("ТАЛЕНТ АЙ:" in state.raw_analysis or "Harvard ManageMentor" in state.raw_analysis)
+            and len(state.raw_analysis) > 100
+            and "[Үргэлжилсэн" not in state.raw_analysis):
+        return state.model_copy(update={"final_output": apply_mongolian_regex_fixes(state.raw_analysis)})
+
+    data_scope = "Бүлгийн дүн шинжилгээ (Excel)" if state.has_excel else "Хувь хүний оноо"
+    test_names = state.detected_test_name or "Central Test"
+
+    formatter_sys = (
+        "You are a Mongolian content formatter for Talent AI. "
+        "Output the full analysis faithfully in Mongolian flowing paragraphs. "
+        "No placeholders. No bullets, dashes, numbered lists. "
+        "Keep all Harvard ManageMentor references exactly.\n"
+        "Start with:\n"
+        "──────────────────────────────────────────────────────────────\n"
+        f"ТАЛЕНТ АЙ: ХҮНИЙ НӨӨЦИЙН СЭТГЭЛ ЗҮЙ\n"
+        f"Эх сурвалж: {test_names} | Хамрах хүрээ: {data_scope}\n"
+        f"Шинжээч: Талент АЙ\n"
+        "──────────────────────────────────────────────────────────────\n"
+    )
+
+    formatted = ""
+    try:
+        formatted = await gemini_simple(formatter_sys, state.raw_analysis)
+    except Exception as exc:
+        logger.error("[Agent 3] Failed: %s", exc)
+        formatted = state.raw_analysis
+
+    if "[Үргэлжилсэн" in formatted or len(formatted) < 50:
+        formatted = state.raw_analysis
+
+    return state.model_copy(update={"final_output": apply_mongolian_regex_fixes(formatted)})
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  PIPELINE
+# ═══════════════════════════════════════════════════════════════════════════
+
+async def run_pipeline(session_id: str, user_message: str) -> str:
+    try:
+        raw_history = get_messages(session_id, limit=30)
+    except Exception:
+        raw_history = []
+
+    cleaned_history = [
+        {"role": m.get("role", "user"), "content": m.get("content", "")}
+        for m in raw_history if m.get("content")
+    ]
+
+    state = AgentState(
+        session_id=session_id,
+        user_prompt=user_message,
+        chat_history=cleaned_history,
+    )
+
+    state = agent_router(state)
+    state = await agent_psychometric_expert(state)
+    state = await agent_critic_formatter(state)
+
+    final = state.final_output or ""
+
+    # ҮРГЭЛЖ хадгална
+    save_message(session_id, "user", user_message)
+    if final and len(final) > 10:
+        save_message(session_id, "assistant", final)
+
+    return final
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  FASTAPI
+# ═══════════════════════════════════════════════════════════════════════════
+
+app = FastAPI(title="Talent AI API", version="2.5.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_methods=["*"],
+    allow_credentials=False,   # "*" origins-тай хамт True тавих боломжгүй (browser хориглоно)
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
- 
- 
-class QueryRequest(BaseModel):
-    prompt: str
-    method: str = "local"
- 
- 
-class QueryResponse(BaseModel):
+
+@app.on_event("startup")
+async def startup_event():
+    init_db()
+    logger.info("Talent AI API v2.5.0 started")
+
+def resolve_session_id(body_sid: Optional[str], request: Request) -> str:
+    return (body_sid or "").strip() or request.headers.get("X-Session-Id", "").strip()
+
+
+class AskRequest(BaseModel):
+    session_id: Optional[str] = None
+    message: Optional[str] = None
+    prompt: Optional[str] = None  # хуучин frontend нийцэл
+
+class AskResponse(BaseModel):
     answer: str
-    request_id: str
-    method: str
-    elapsed_ms: int
- 
- 
-@app.post("/ask", response_model=QueryResponse)
-async def ask_graph(request: Request, body: QueryRequest):
-    if request.headers.get("X-API-Key", "") != API_KEY:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    if _search_engine is None:
-        return JSONResponse(status_code=503, content={"error": "Engine not loaded."})
- 
-    rid = str(uuid.uuid4())[:8]
-    t0 = time.time()
+
+@app.post("/ask", response_model=AskResponse)
+async def ask_endpoint(request: Request, body: AskRequest):
+    session_id = resolve_session_id(body.session_id, request)
+    user_message = (body.message or body.prompt or "").strip()
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id шаардлагатай.")
+    if not user_message:
+        raise HTTPException(status_code=400, detail="message шаардлагатай.")
     try:
-        # Мэндчилгээний шуурхай хариулт
-        exact_greetings = {"сайн байна уу", "сайн уу", "байна уу", "мэнд", "hello", "hi", "сайн"}
-        prompt_clean = body.prompt.strip().lower().rstrip("?!. ")
-        if prompt_clean in exact_greetings and len(body.prompt.strip()) <= 20:
-            return QueryResponse(
-                answer="Сайн байна уу! Танд юугаар туслах вэ?",
-                request_id=rid, method=body.method, elapsed_ms=0,
-            )
- 
-        # Excel session context
-        session_id = request.headers.get("X-Session-Id", "default")
-        excel_ctx = _excel_sessions.get(session_id)
-        if not excel_ctx:
-            import json as _json
-            try:
-                with open(f"/tmp/excel_session_{session_id}.json") as sf:
-                    excel_ctx = _json.load(sf)
-                    _excel_sessions[session_id] = excel_ctx
-            except Exception:
-                excel_ctx = None
- 
-        if excel_ctx:
-            _ex_dt = excel_ctx.get('detected_tests', [])
-            _ex_dt = _ex_dt if isinstance(_ex_dt, list) else [str(_ex_dt)]
-            _ex_forbidden = [t for t in ['CTPI','Big5','PP','VOC','EQ','MOTIVATION+','Sales Competency','SALES']
-                             if not any(t.lower() in str(d).lower() for d in _ex_dt)]
-            _ex_forbidden_str = ", ".join(_ex_forbidden) if _ex_forbidden else "байхгүй"
-            excel_info = (
-                f"\n\n[Excel өгөгдлийн контекст]\n"
-                f"Нийт ажилтан: {excel_ctx['rows']}\n"
-                f"Баганууд: {excel_ctx['columns']}\n"
-                f"Илэрсэн тестүүд: {excel_ctx.get('detected_tests', '')}\n"
-                f"Өгөгдлийн хураангуй:\n{excel_ctx['summary']}\n"
-                f"[EXCEL PROMPT GUARD]\n"
-                f"Энэ файлд ЗӨВХӨН байгаа тест: {excel_ctx.get('detected_tests', '')}\n"
-                f"ХАТУУ ХОРИГЛОНО: {_ex_forbidden_str}\n"
-                f"Дээрх ХОРИГЛОНО жагсаалтын тестийн нэр, нэршил, хэмжүүрийг хариултад НЭГ Ч УДАА дурдаж болохгүй.\n"
-                f"Зөрчвөл хариулт БҮРЭН БУРУУ тооцогдоно.\n"
-                f"Дээрх өгөгдөлд үндэслэн асуултад хариул.\n"
-            )
-            query = SYSTEM_PROMPT + excel_info + "\n\nАсуулт: " + body.prompt
-        else:
-            query = SYSTEM_PROMPT + body.prompt
- 
-        # Context builder
-        loop = asyncio.get_running_loop()
-        ctx_result = await loop.run_in_executor(
-            None,
-            lambda: _search_engine.context_builder.build_context(query=query),
-        )
-        context_text = ctx_result.context if hasattr(ctx_result, "context") else str(ctx_result)
-        full_prompt = f"{query}\n\nContext:\n{context_text}"
- 
-        # Gemini дуудлага (retry дотор)
-        answer = await loop.run_in_executor(
-            None, lambda: _gemini_generate(_gemini_client, full_prompt)
-        )
-        if excel_ctx:
-            detected_fix = excel_ctx.get("detected_tests", [])
-            answer = _fix_text(answer, allowed=[t.lower() for t in detected_fix] if detected_fix else None)
-        else:
-            answer = _fix_text(answer, allowed=_detect_tests_from_context(context_text))
+        answer = await run_pipeline(session_id, user_message)
+    except Exception as exc:
+        logger.exception("Pipeline crashed: %s", exc)
+        raise HTTPException(status_code=500, detail="Шинжилгээний системд алдаа гарлаа.")
+    return AskResponse(answer=answer)
 
-        # /ask post-filter: excel session-д байхгүй тестийн нэрийг арилгах
-        if excel_ctx:
-            import re as _re3
-            detected_ask = excel_ctx.get("detected_tests", [])
-            if isinstance(detected_ask, str):
-                detected_ask = [detected_ask]
-            all_tests = ["CTPI", "Big5", "PP", "PP Test", "VOC", "EQ", "MOTIVATION+", "Sales Competency"]
-            missing_ask = [t for t in all_tests if not any(t.lower() in d.lower() for d in detected_ask)]
-            for mt in missing_ask:
-                import re as _re3
-                answer = _re3.sub(rf'\*\*{_re3.escape(mt)}\*\*', mt, answer)
-                answer = _re3.sub(rf'(?<!\w){_re3.escape(mt)}(?!\w)[^.]*тест[^.]*\.', '', answer)
 
-        ms = int((time.time() - t0) * 1000)
-        if not answer:
-            return JSONResponse(status_code=502, content={"error": "Empty answer."})
-        logger.info(f"[{rid}] OK {ms}ms")
-        return QueryResponse(answer=answer, request_id=rid, method=body.method, elapsed_ms=ms)
- 
-    except Exception as ex:
-        logger.error(f"[{rid}] Failed: {ex}")
-        return JSONResponse(status_code=502, content={"error": "Search failed."})
- 
- 
-@app.get("/health")
-async def health():
-    return {"status": "ok", "engine": _search_engine is not None}
- 
- 
-EXCEL_PROMPT = (
-    "Та бол Central Test-ийн албан ёсны арга зүйд мэргэшсэн ХҮНИЙ НӨӨЦИЙН ХИЙМЭЛ ОЮУН УХААНТ ЗӨВЛӨХ СИСТЕМ бөгөөд 'Талент АЙ' юм. "
-    "Хэрэглэгчийн өгсөн Excel өгөгдөл болон тестийн үр дүнд сэтгэл зүйн гүнзгий дүн шинжилгээ (Psychometric Analysis) хийхдээ "
-    "хувь ажилтан бүрээр биш, тухайн БАЙГУУЛЛАГЫН НИЙТ ДҮР ТӨРХ, БАГИЙН СОЁЛД нэгдсэн дүн шинжилгээ хийнэ.\n\n"
-    "ЧАНД БАРИМТЛАХ ШАЛГУУР ШААРДЛАГУУД:\n\n"
-    "ХАТУУ ДҮРЭМ — ЭНЭ ДҮРМИЙГ ЗӨРЧВӨЛ ХАРИУЛТ БУРУУ ТООЦОГДОНО:\n"
-    "1. ХҮСНЭГТ, БАГАНА, MARKDOWN TABLE (|) ОГТХОН АШИГЛАХГҮЙ. ЗӨРЧВӨЛ БУРУУ!\n"
-    "2. Зөвхөн өгөгдөлд байгаа ТЕСТИЙН нэрийг ашигла. CTPI өгвөл зөвхөн CTPI. Big5 өгвөл зөвхөн Big5. ОГТХОН ХОЛЬЖ БОЛОХГҮЙ!\n"
-    "3. Бүх хариултыг ЗӨВХӨН үргэлжилсэн өгүүлбэр, догол мөрөөр бич.\n\n"
-    "ТАЛЕНТ АЙ: ХҮНИЙ НӨӨЦИЙН СЭТГЭЛ ЗҮЙН ДҮН ШИНЖИЛГЭЭ\n"
-    "Эх сурвалж: [Зөвхөн өгөгдөлд байгаа тестийн нэр] | Хамрах хүрээ: [Нийт мөр]\n"
-    "Шинжээч: Талент АЙ\n\n"
-    "⚖️ ЕРӨНХИЙ ТОЙМ\n"
-    "Үргэлжилсэн өгүүлбэрээр бич. Хүснэгт огт гаргахгүй.\n\n"
-    "👤 БАЙГУУЛЛАГЫН ДҮР ТӨРХ\n"
-    "Үргэлжилсэн өгүүлбэрээр бич. Хүснэгт огт гаргахгүй.\n\n"
-    "📈 ЗӨВЛӨМЖ\n"
-    "Үргэлжилсэн өгүүлбэрээр бич. Хүснэгт огт гаргахгүй.\n\n"
-    "2. Зөвхөн НЭГ ТЕСТ-ийн үр дүн оруулсан бол бусад тестийн нэр томьёо ашиглахыг ХАТУУ ХОРИГЛОНО.\n"
-    "3. Excel-ээс орж ирж буй БҮХ МӨР, ТООН УТГА бүрийг бүрэн уншиж дундаж, хазайлтыг тооцно.\n"
-    "4. Урт онолын тайлбар устга. Өгүүлбэр бүр нягт, стратегийн шийдвэрт туслах байна.\n"
-    "НЭМЭЛТ ДҮРМҮҮД: Зөвхөн монгол хэлээр. Хүснэгт/markdown table(|) огтхон ашиглахгүй. "
-    "Байгууллагын нэр дурдахгүй. Зохиомол тоо гаргахгүй.\n\n"
-)
- 
- 
 @app.post("/analyze-excel")
-async def analyze_excel(
+async def analyze_excel_endpoint(
     request: Request,
     file: UploadFile = File(...),
-    question: str = "Энэ өгөгдлийг дүн шинжилгээ хийж дүгнэлт гарга",
+    question: str = Form(default="Энэ өгөгдлийг дүн шинжилгээ хийж дүгнэлт гарга"),
+    session_id: Optional[str] = Form(default=None),
 ):
-    if request.headers.get("X-API-Key", "") != API_KEY:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+    sid = resolve_session_id(session_id, request)
+    if not sid:
+        raise HTTPException(status_code=400, detail="session_id шаардлагатай.")
+    if not file.filename.lower().endswith((".xlsx", ".xls", ".csv")):
+        raise HTTPException(status_code=400, detail="Зөвхөн .xlsx, .xls, .csv файл зөвшөөрнө.")
     try:
-        contents = await file.read()
-        filename = file.filename or "file.xlsx"
-        processed = _ep.process_excel(contents, filename, question)
-        summary_text = processed["prompt_data"]
-        if len(summary_text) > 30000:
-            summary_text = summary_text[:30000] + "\n...[өгөгдлийн үргэлжлэл орхигдлоо]..."
-        # Prompt Guard — зөвхөн илэрсэн тестийн нэрийг ашиглах
-        detected = processed.get("detected_tests", [])
-        if isinstance(detected, str):
-            detected = [detected]
-        detected_str = ", ".join(detected) if detected else "тодорхойгүй"
-        all_possible = ["CTPI", "Big5", "PP", "VOC", "EQ", "MOTIVATION+", "Sales Competency"]
-        missing = [t for t in all_possible if not any(t.lower() in d.lower() for d in detected)]
-        missing_str = ", ".join(missing) if missing else ""
+        file_bytes = await file.read()
+        result = process_excel(file_bytes, file.filename, question=question)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Файл боловсруулахад алдаа: {exc}")
 
-        guard = (
-            f"\n\n╔══ PROMPT GUARD ══╗\n"
-            f"Энэ файлд ЗӨВХӨН дараах тест(үүд) байна: {detected_str}\n"
-        )
-        if missing_str:
-            guard += f"ОГТХОН дурдаж болохгүй тестүүд: {missing_str}\n"
-        guard += (
-            f"Дээрх байхгүй тестүүдийн нэр, үр дүн, хэмжүүрийг хариултад оруулбал БУРУУ хариулт болно.\n"
-            f"╚════════════════════╝\n"
-        )
+    detected_tests = result.get("detected_tests", [])
+    primary_test = detected_tests[0] if detected_tests else "Тодорхойгүй"
+    update_session_file(
+        session_id=sid, filename=file.filename,
+        summary=result.get("summary", ""), test_name=primary_test,
+        rows=result.get("rows", 0), columns=result.get("columns", []),
+        raw_data=result.get("raw_data", []),
+    )
+    try:
+        answer = await run_pipeline(sid, question)
+    except Exception as exc:
+        logger.exception("Pipeline crashed after excel upload: %s", exc)
+        answer = "Файл хадгалагдлаа. Дараагийн асуултаа бичнэ үү."
+    return {"status": "processed", "session_id": sid, "test_name": primary_test, "answer": answer}
 
-        prompt = _ep.build_excel_prompt(
-            {**processed, "prompt_data": summary_text}, question, EXCEL_PROMPT
-        )
-        prompt = prompt + guard
 
-        # Retry дотор дуудна
-        answer = _gemini_generate(_gemini_client, prompt)
-        answer = _fix_text(answer, allowed=[t.lower() for t in detected])
- 
-        session_id = request.headers.get("X-Session-Id", "default")
-        ctx = {
-            "summary": processed["summary"],
-            "columns": processed["columns"],
-            "rows": processed["rows"],
-            "detected_tests": processed["detected_tests"],
-            "filename": filename,
-            "last_answer": answer[:3000] if answer else "",
-        }
-        _excel_sessions[session_id] = ctx
-        # /tmp файлд хадгална — backend restart хийсэн ч session хадгалагдана
-        try:
-            import json as _json_tmp
-            with open(f"/tmp/excel_session_{session_id}.json", "w") as _sf:
-                _json_tmp.dump(ctx, _sf, ensure_ascii=False)
-        except Exception as _tmp_err:
-            logger.warning(f"Tmp session save failed: {_tmp_err}")
-        try:
-            _db.save_excel_session(
-                session_id=session_id,
-                filename=filename,
-                rows=processed["rows"],
-                columns=processed["columns"],
-                summary=processed["summary"],
-                raw_data=processed["raw_data"],
-            )
-            _db.save_message(session_id, "user", f"📊 {filename} файл оруулав — {question}")
-            _db.save_message(session_id, "ai", answer)
-        except Exception as db_err:
-            logger.warning(f"DB save failed: {db_err}")
- 
-        result = {
-            "answer": answer,
-            "rows": processed["rows"],
-            "columns": processed["columns"],
-            "detected_tests": processed["detected_tests"],
-            "session_id": session_id,
-            "filename": filename,
-        }
-        if processed["dropped_cols"] > 0:
-            result["warning"] = (
-                f"{processed['dropped_cols']} багана орхигдлоо — хамгийн ялгаатай 20 баганыг ашиглав"
-            )
-        return result
- 
-    except Exception as ex:
-        logger.error(f"Excel analysis failed: {ex}", exc_info=True)
-        return JSONResponse(status_code=500, content={"error": f"Алдаа: {str(ex)}"})
- 
- 
+@app.post("/upload-excel")
+async def upload_excel_endpoint(
+    request: Request,
+    file: UploadFile = File(...),
+    session_id: Optional[str] = Form(default=None),
+):
+    sid = resolve_session_id(session_id, request)
+    if not sid:
+        raise HTTPException(status_code=400, detail="session_id шаардлагатай.")
+    if not file.filename.lower().endswith((".xlsx", ".xls", ".csv")):
+        raise HTTPException(status_code=400, detail="Unsupported format.")
+    try:
+        file_bytes = await file.read()
+        result = process_excel(file_bytes, file.filename, question="")
+        detected_tests = result.get("detected_tests", [])
+        primary_test = detected_tests[0] if detected_tests else "Тодорхойгүй"
+        update_session_file(
+            session_id=sid, filename=file.filename,
+            summary=result.get("summary", ""), test_name=primary_test,
+            rows=result.get("rows", 0), columns=result.get("columns", []),
+            raw_data=result.get("raw_data", []),
+        )
+        return {"status": "processed", "session_id": sid, "test_name": primary_test}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/sessions")
+async def create_session_endpoint():
+    return {"session_id": create_session()}
+
+@app.get("/sessions")
+async def list_sessions_endpoint():
+    return {"sessions": get_all_sessions()}
+
+@app.delete("/sessions/{session_id}")
+async def delete_session_endpoint(session_id: str):
+    delete_session(session_id)
+    return {"status": "deleted", "session_id": session_id}
+
+@app.get("/health")
+async def health_check():
+    return {"status": "ok", "version": "2.5.0"}
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run("main_api:app", host="0.0.0.0", port=8000, reload=True)
