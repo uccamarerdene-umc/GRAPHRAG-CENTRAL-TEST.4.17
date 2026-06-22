@@ -107,7 +107,7 @@ export default function Home() {
   const handleFileChange = (e) => {
     const file = e.target.files[0]
     if (!file) return
-    const q = window.prompt('Энэ өгөгдлөөс юу мэдэхийг хүсэж байна вэ?', 'Дүн шинжилгээ хийж дүгнэлт гарга')
+    const q = 'Дүн шинжилгээ хийж дүгнэлт гарга'
     uploadExcel(file, q)
     e.target.value = ''
   }
