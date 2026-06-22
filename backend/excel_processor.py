@@ -2,13 +2,13 @@ import pandas as pd
 import io, re
 
 TEST_PATTERNS = {
-    "CTPI": [r"ctpi", r"манлайлах", r"анализ хийх", r"шийдвэр гаргах", r"харилцаа тогтоох", r"менторлох", r"бүтээлч"],
-    "Big5": [r"big.?5", r"нийтэч", r"нягт нямбай", r"нээлттэй", r"openness", r"meticulousness", r"sociability", r"emotional.?balance", r"consciousness"],
-    "PP": [r"\bpp\b", r"focus.?on.?facts", r"desire.?to.?lead", r"ambition", r"extraversion", r"flexibility"],
-    "VOC": [r"\bvoc\b", r"мэргэжлийн сонирхол", r"intellectual.?curiosity", r"enterprising", r"methodical"],
-    "EQ": [r"\beq\b", r"emotional.?intell", r"сэтгэл хөдлөлийн"],
-    "MOTIVATION": [r"motivation", r"сэдэл"],
-    "SALES": [r"sales", r"борлуулалт"],
+    "CTPI":  [r"\bctpi\b"],
+    "Big5":  [r"\bbig.?5\b"],
+    "PP":    [r"\bpp2\b", r"professional.?profile"],
+    "VOC":   [r"\bvoc\b"],
+    "EQ":    [r"\beq\b"],
+    "MOTIVATION": [r"\bmotivation\b"],
+    "SALES": [r"\bsales.?competency\b"],
 }
 
 def detect_test_type(columns):
