@@ -84,3 +84,60 @@ def get_excel_session(session_id):
     d["columns"] = json.loads(d["columns_json"])
     d["raw_data"] = json.loads(d["raw_data_json"]) if d["raw_data_json"] else []
     return d
+
+import uuid
+
+def create_session():
+    """Шинэ session үүсгэж ID буцаана."""
+    sid = str(uuid.uuid4())
+    conn = get_connection()
+    try:
+        conn.execute(
+            "INSERT OR IGNORE INTO excel_sessions (session_id, filename, summary, test_name, rows, columns) VALUES (?, '', '', '', 0, '[]')", (sid,)
+        )
+        conn.commit()
+    except Exception:
+        pass
+    finally:
+        conn.close()
+    return sid
+
+def get_session(session_id):
+    """Session мэдээллийг буцаана."""
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT * FROM excel_sessions WHERE session_id = ?", (session_id,)
+        ).fetchone()
+        return row
+    except Exception:
+        return None
+    finally:
+        conn.close()
+
+def update_session_file(session_id, filename, summary, test_name, rows, columns, raw_data=None):
+    """Session-д Excel файлын мэдээллийг шинэчилнэ."""
+    import json
+    conn = get_connection()
+    try:
+        conn.execute("""
+            INSERT INTO excel_sessions (session_id, filename, summary, test_name, rows, columns, raw_data)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(session_id) DO UPDATE SET
+                filename=excluded.filename,
+                summary=excluded.summary,
+                test_name=excluded.test_name,
+                rows=excluded.rows,
+                columns=excluded.columns,
+                raw_data=excluded.raw_data
+        
+        """, (
+            session_id, filename, summary, test_name, rows,
+            json.dumps(columns, ensure_ascii=False),
+            json.dumps(raw_data or [], ensure_ascii=False)
+        ))
+        conn.commit()
+    except Exception as e:
+        print(f"update_session_file error: {e}")
+    finally:
+        conn.close()
